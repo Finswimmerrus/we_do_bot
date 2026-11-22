@@ -4,6 +4,7 @@ import { taskTitle } from './store.js';
 export const maxVoiceSeconds = 90;
 export const maxVoiceBytes = 4 * 1024 * 1024;
 const maxTasks = 15;
+const recognitionPrompt = 'Список задач. Купить, оплатить, забрать, позвонить, записаться, заказать.';
 
 const ordinal = 'первое|второе|третье|четв[её]ртое|пятое|шестое|седьмое|восьмое|девятое|десятое';
 const action = [
@@ -43,8 +44,9 @@ export function voiceTranscriber(endpoint, request = fetch) {
     body.set('file', new Blob([audio], { type: 'audio/ogg' }), 'voice.ogg');
     body.set('response_format', 'json');
     body.set('temperature', '0');
-    body.set('temperature_inc', '0');
+    body.set('temperature_inc', '0.2');
     body.set('language', 'ru');
+    body.set('prompt', recognitionPrompt);
     const response = await request(url, {
       method: 'POST', body, redirect: 'error',
       signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
@@ -52,6 +54,6 @@ export function voiceTranscriber(endpoint, request = fetch) {
     if (!response.ok) throw new Error('Сервис распознавания вернул ошибку.');
     const result = await response.json();
     if (typeof result.text !== 'string') throw new Error('Сервис распознавания вернул неожиданный ответ.');
-    return result.text;
+    return result.text.trim().replace(recognitionPrompt, '').trim();
   };
 }
