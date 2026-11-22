@@ -3,11 +3,13 @@
 const $ = (id) => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
 const ui = {
-  view: 'backlog', panel: 'list', listRequest: 0, cardRequest: 0,
-  filterStatus: { backlog: 'active', periods: 'all' },
+  view: 'day', panel: 'list', listRequest: 0, cardRequest: 0,
+  filterStatus: { day: 'active', month: 'all', year: 'all', unscheduled: 'active', major: 'active' },
+  filterAssignee: { day: 'me', month: 'all', year: 'all', unscheduled: 'all', major: 'all' },
   task: null, review: null, session: null,
-  catalog: { categories: [] }, labelToDelete: null,
+  catalog: { categories: [] }, labelToDelete: null, today: null, dayFinished: false,
 };
+const viewTitles = { day: 'День', month: 'Месяц', year: 'Год', unscheduled: 'Без срока', major: 'Крупные', statistics: 'Статистика' };
 const importanceNames = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
@@ -63,16 +65,20 @@ function show(panel) {
 }
 
 function periodLabel(period) {
-  if (!period) return 'Без месяца';
+  if (!period) return 'Без срока';
   if (period.length === 4) return period;
+  if (period.length === 10) return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' })
+    .format(new Date(`${period}T00:00:00Z`));
   const month = new Intl.DateTimeFormat('ru-RU', { month: 'long', timeZone: 'UTC' })
     .format(new Date(`${period}-01T00:00:00Z`));
   return `${month[0].toUpperCase()}${month.slice(1)} ${period.slice(0, 4)}`;
 }
 
 function selectedScope() {
-  if (ui.view === 'backlog' && $('backlog-scope').value !== 'month') return $('backlog-scope').value;
-  if (ui.view !== 'backlog' && $('period-mode').value === 'year') {
+  if (ui.view === 'unscheduled') return 'none';
+  if (ui.view === 'major') return 'all';
+  if (ui.view === 'day') return $('scope-day').value || ui.today;
+  if (ui.view === 'year' || ui.view === 'statistics' && $('period-mode').value === 'year') {
     return $('scope-year').validity.valid && $('scope-year').value || ui.session.currentPeriod.slice(0, 4);
   }
   return /^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test($('scope-month').value) ? $('scope-month').value : ui.session.currentPeriod;
@@ -86,23 +92,34 @@ function fillCategoryFilter(categories) {
   const select = $('filter-category');
   const previous = select.value;
   select.replaceChildren(new Option('Все', ''),
-    ...categories.map((category) => new Option(categoryOption(category), category.name)));
-  select.value = categories.some(({ name }) => name === previous) ? previous : '';
+    ...categories.map((category) => new Option(categoryOption(category), category.id)));
+  select.value = categories.some(({ id }) => String(id) === previous) ? previous : '';
 }
 
-function categoryChip({ name, color, icon }) {
+function categoryChip({ name, color, icon }, compact = false) {
   const chip = element('span', undefined, 'label-chip');
   const [symbol] = ui.session.categoryIcons[icon || 'folder'];
   const badge = element('span', symbol, 'category-icon');
   if (color) badge.style.setProperty('--category-color', color);
   badge.setAttribute('aria-hidden', 'true');
-  chip.append(badge, element('span', name));
+  if (compact) {
+    chip.classList.add('category-compact');
+    chip.title = name;
+    badge.removeAttribute('aria-hidden');
+    badge.setAttribute('aria-label', name);
+    chip.append(badge);
+  } else chip.append(badge, element('span', name));
   return chip;
 }
 
-function priorityBadge(importance) {
-  const badge = element('span', importanceNames[importance], 'importance-chip');
+function priorityBadge(importance, compact = false) {
+  const label = importanceNames[importance];
+  const badge = element('span', compact ? undefined : label, compact ? 'importance-dot' : 'importance-chip');
   badge.dataset.importance = importance;
+  if (compact) {
+    badge.title = label;
+    badge.setAttribute('aria-label', label);
+  }
   return badge;
 }
 
@@ -140,22 +157,55 @@ function taskRow(task, hidePeriod = false) {
   const open = element('button', undefined, 'task-open');
   open.type = 'button';
   open.append(element('span', task.title, 'task-title'));
-  const fields = hidePeriod ? [] : [periodLabel(task.period)];
-  if (task.status === 'obsolete') fields.unshift('Отменена');
-  if (task.parentTitle) fields.push(`к «${task.parentTitle}»`);
-  if (fields.length) open.append(element('small', fields.join(' · ')));
   const labels = element('span', undefined, 'task-labels');
+  if (task.parentTitle) labels.append(taskHint('↳', `Подзадача к «${task.parentTitle}»`));
   if (task.category) {
     const category = ui.catalog.categories.find(({ name }) => name === task.category) ?? { name: task.category };
-    labels.append(categoryChip(category));
+    labels.append(categoryChip(category, true));
   }
-  labels.append(priorityBadge(task.importance));
+  labels.append(priorityBadge(task.importance, true));
+  if (task.assigneeId) {
+    const isMine = task.assigneeId === ui.session.userId;
+    labels.append(taskHint(isMine ? '👤' : '👥', isMine ? 'Мне' : 'Партнёру'));
+  }
+  if (!hidePeriod && task.period) labels.append(element('small', periodLabel(task.period)));
+  if (task.status === 'obsolete') labels.append(taskHint('–', 'Отменена'));
   open.append(labels);
   open.addEventListener('click', () => run(() => openTask(task.id), open));
   const actions = element('div', undefined, 'task-status-actions');
   renderStatusActions(actions, task);
+  if (ui.view === 'day' && task.status === 'active' && task.period?.length === 10
+      && (task.period < ui.today || task.period === ui.today && ui.dayFinished)) {
+    const target = task.period < ui.today ? ui.today : nextDay(ui.today);
+    if (target) {
+      const move = element('button', '↪', 'icon-button');
+      const label = task.period < ui.today ? 'Перенести на сегодня' : 'Перенести на завтра';
+      move.type = 'button';
+      move.title = label;
+      move.setAttribute('aria-label', `${label}: ${task.title}`);
+      move.addEventListener('click', () => run(async () => {
+        await api(`tasks/${task.id}`, { version: task.version, period: target }, 'PATCH');
+        if (ui.panel === 'list') await loadList();
+        notify(`Перенесено на ${periodLabel(target)}.`);
+      }, move));
+      actions.prepend(move);
+    }
+  }
   row.append(open, actions);
   return row;
+}
+
+function taskHint(symbol, label) {
+  const hint = element('span', symbol, 'task-hint');
+  hint.title = label;
+  hint.setAttribute('aria-label', label);
+  return hint;
+}
+
+function nextDay(day) {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.getUTCFullYear() <= 9999 ? date.toISOString().slice(0, 10) : null;
 }
 
 function renderStatusActions(container, task, card = false) {
@@ -193,6 +243,8 @@ function showTaskStatus(task) {
   $('task-priority').replaceChildren(priorityBadge(task.importance));
   $('task-status-label').textContent = 'Отменена';
   $('task-status-label').hidden = task.status !== 'obsolete';
+  $('take-today').hidden = task.status !== 'active' || task.importance === 'global'
+    || task.period === ui.today && task.assigneeId === ui.session.userId;
   renderStatusActions($('task-status-actions'), task, true);
 }
 
@@ -254,30 +306,35 @@ async function refreshVisibleTasks() {
 
 async function loadList() {
   const seq = ++ui.listRequest;
-  const periods = ui.view !== 'backlog';
+  const view = ui.view;
   const statistics = ui.view === 'statistics';
   const scope = selectedScope();
-  const params = statistics ? new URLSearchParams({ scope, include: 'summary' })
+  const params = statistics ? new URLSearchParams({ scope, view, include: 'summary' })
     : new URLSearchParams({
-    scope, status: $('filter-status').value, query: $('filter-query').value,
-    category: $('filter-category').value, importance: $('filter-importance').value, include: 'catalog',
-  });
-  $('period-mode-label').hidden = !periods;
-  $('backlog-scope-label').hidden = periods;
-  $('scope-month-label').hidden = periods ? $('period-mode').value === 'year' : $('backlog-scope').value !== 'month';
-  $('scope-year-label').hidden = !periods || $('period-mode').value !== 'year';
+      scope, view, status: $('filter-status').value, query: $('filter-query').value,
+      categoryId: $('filter-category').value, assignee: $('filter-assignee').value,
+      importance: view === 'major' ? '' : $('filter-importance').value, include: 'catalog',
+    });
+  $('period-mode-label').hidden = !statistics;
+  $('scope-day-label').hidden = view !== 'day';
+  $('scope-month-label').hidden = view !== 'month' && !(statistics && scope.length === 7);
+  $('scope-year-label').hidden = view !== 'year' && !(statistics && scope.length === 4);
   for (const filter of document.querySelectorAll('[data-task-filter]')) filter.hidden = statistics;
-  $('quick-add').hidden = statistics || periods && scope.length !== 7;
+  $('filter-importance').closest('label').hidden = statistics || view === 'major';
+  $('quick-add').hidden = statistics;
   $('review-start').hidden = !statistics;
-  $('view-title').textContent = statistics ? 'Статистика' : periods ? periodLabel(scope) : 'Бэклог';
+  $('view-title').textContent = view === 'day' ? scope === ui.today ? 'Сегодня' : periodLabel(scope)
+    : view === 'month' || view === 'year' ? periodLabel(scope) : viewTitles[view];
   $('stats').hidden = !statistics;
   $('task-list').hidden = statistics;
+  $('carryover').hidden = true;
+  $('day-rollover-note').hidden = true;
   if (statistics) $('list-empty').hidden = true;
   if (!statistics || scope.length !== 4) $('year-grid').hidden = true;
   $('task-list').setAttribute('aria-busy', 'true');
 
   try {
-    const { tasks, stats, monthStats, catalog } = await api(`tasks?${params}`);
+    const { tasks, stats, monthStats, catalog, carryover, today, dayFinished, partnerId } = await api(`tasks?${params}`);
     if (seq !== ui.listRequest) return;
     if (statistics) {
       showStats(stats);
@@ -285,14 +342,27 @@ async function loadList() {
       return;
     }
     ui.catalog = catalog;
-    fillCategoryFilter(catalog.categories);
-    if ($('filter-category').value !== params.get('category')) {
+    const previousToday = ui.today;
+    ui.today = today;
+    ui.dayFinished = dayFinished;
+    ui.session.partnerId = partnerId;
+    syncAssigneeFilter();
+    if (view === 'day' && scope === previousToday && today !== previousToday) {
+      $('scope-day').value = today;
       return await loadList();
     }
-    const hidePeriod = scope.length === 7;
+    fillCategoryFilter(catalog.categories);
+    if ($('filter-category').value !== params.get('categoryId') || $('filter-assignee').value !== params.get('assignee')) {
+      return await loadList();
+    }
+    $('carryover').hidden = !carryover.length;
+    $('carryover-list').replaceChildren(...carryover.map((task) => taskRow(task)));
+    $('day-rollover-note').hidden = view !== 'day' || scope !== today || !dayFinished
+      || !tasks.some((task) => task.status === 'active');
+    const hidePeriod = view !== 'major';
     $('task-list').replaceChildren(...tasks.map((task) => taskRow(task, hidePeriod)));
     $('list-empty').hidden = tasks.length > 0;
-    $('list-empty').textContent = 'По этим фильтрам задач нет.';
+    $('list-empty').textContent = view === 'day' ? 'На этот день по выбранным фильтрам задач нет.' : 'По этим фильтрам задач нет.';
     return tasks;
   } finally {
     if (seq === ui.listRequest) $('task-list').removeAttribute('aria-busy');
@@ -305,6 +375,10 @@ function changeView(name) {
     tab.setAttribute('aria-current', tab.dataset.view === name ? 'page' : 'false');
   }
   if (name !== 'statistics') $('filter-status').value = ui.filterStatus[name];
+  if (name !== 'statistics') {
+    $('filter-assignee').value = ui.filterAssignee[name];
+    syncAssigneeFilter();
+  }
   show('list');
   return loadList();
 }
@@ -348,6 +422,45 @@ function categoryChoice(value, inputId) {
   return value ? { id: Number(value) } : null;
 }
 
+function syncAssigneeFilter() {
+  const select = $('filter-assignee');
+  const partner = select.querySelector('option[value="partner"]');
+  partner.hidden = !ui.session.partnerId;
+  partner.disabled = !ui.session.partnerId;
+  if (!ui.session.partnerId && select.value === 'partner') select.value = 'all';
+}
+
+function assigneeOptions(select, assigneeId) {
+  select.replaceChildren(new Option('Без назначения', ''), new Option('Мне', ui.session.userId));
+  if (ui.session.partnerId) select.add(new Option('Партнёру', ui.session.partnerId));
+  select.value = assigneeId ?? '';
+}
+
+function toggleSchedule(prefix) {
+  const kind = $(`${prefix}-schedule`).value;
+  for (const type of ['day', 'month', 'year']) {
+    const input = $(`${prefix}-${type}`);
+    const visible = type === kind;
+    $(`${prefix}-${type}-label`).hidden = !visible;
+    input.disabled = !visible;
+    input.required = visible;
+  }
+}
+
+function setSchedule(prefix, period) {
+  const kind = period?.length === 10 ? 'day' : period?.length === 7 ? 'month' : period?.length === 4 ? 'year' : '';
+  $(`${prefix}-schedule`).value = kind;
+  $(`${prefix}-day`).value = kind === 'day' ? period : ui.today;
+  $(`${prefix}-month`).value = kind === 'month' ? period : ui.today.slice(0, 7);
+  $(`${prefix}-year`).value = kind === 'year' ? period : ui.today.slice(0, 4);
+  toggleSchedule(prefix);
+}
+
+function scheduleValue(prefix) {
+  const kind = $(`${prefix}-schedule`).value;
+  return kind ? $(`${prefix}-${kind}`).value : null;
+}
+
 function prepareChildForm(task) {
   $('child-options').open = false;
   const defaults = task.category
@@ -357,7 +470,8 @@ function prepareChildForm(task) {
     ...ui.catalog.categories.map((category) => new Option(categoryOption(category), category.id)),
     new Option('Новая категория…', 'new'));
   $('child-title').value = '';
-  $('child-period').value = '';
+  setSchedule('child', null);
+  assigneeOptions($('child-assignee'), null);
   $('child-category-new').value = '';
   toggleCategoryInput('child-category', 'child-category-new-field', 'child-category-new');
 }
@@ -375,7 +489,8 @@ async function openTask(id) {
   $('task-details').textContent = task.parentTitle ? `Подзадача к «${task.parentTitle}»` : '';
   showTaskStatus(task);
   $('edit-title').value = task.title;
-  $('edit-period').value = task.period || '';
+  setSchedule('edit', task.period);
+  assigneeOptions($('edit-assignee'), task.assigneeId);
   $('edit-importance').value = task.importance;
   $('edit-category').replaceChildren(new Option('Без категории', ''),
     ...catalog.categories.map((category) => new Option(categoryOption(category), category.id)),
@@ -401,7 +516,8 @@ async function updateTask() {
     version: task.version,
     title: $('edit-title').value,
     importance: $('edit-importance').value,
-    period: $('edit-period').value || null,
+    period: scheduleValue('edit'),
+    assigneeId: Number($('edit-assignee').value) || null,
     categoryChoice: categoryChoice($('edit-category').value, 'new-category'),
   };
   if (!$('edit-parent').disabled) patch.parentId = Number($('edit-parent').value) || null;
@@ -417,7 +533,7 @@ async function updateTask() {
 
 async function startReview() {
   const scope = selectedScope();
-  const { tasks } = await api(`tasks?scope=${scope}&status=active`);
+  const { tasks } = await api(`tasks?scope=${scope}&status=active&view=statistics`);
   ui.review = { scope, ids: tasks.map((task) => task.id), task: null };
   show('review');
   renderReview(tasks);
@@ -443,7 +559,7 @@ async function reviewAction(change) {
   const review = ui.review;
   if (review.busy || !review.task) return;
   review.busy = true;
-  const current = () => api(`tasks?scope=${review.scope}&status=active`);
+  const current = () => api(`tasks?scope=${review.scope}&status=active&view=statistics`);
   try {
     if (change) {
       if ('period' in change && change.period === review.task.period) throw new Error('Выберите другой месяц или оставьте задачу.');
@@ -473,6 +589,8 @@ async function reviewAction(change) {
 async function openSettings() {
   ui.cardRequest++;
   const session = await api('session');
+  ui.session = session;
+  syncAssigneeFilter();
   $('partner-info').textContent = session.partnerJoined ? 'Партнёр уже присоединился.' : 'Отправьте ссылку партнёру. Она действует до первого подключения.';
   $('invite-link').hidden = !session.invite;
   $('copy-invite').hidden = !session.invite || !navigator.clipboard;
@@ -564,9 +682,12 @@ function bindUi() {
   for (const tab of document.querySelectorAll('[data-view]')) {
     tab.addEventListener('click', () => run(() => changeView(tab.dataset.view), tab));
   }
-  for (const id of ['period-mode', 'backlog-scope', 'scope-month', 'scope-year', 'filter-category', 'filter-importance', 'filter-status']) {
+  for (const id of ['period-mode', 'scope-day', 'scope-month', 'scope-year', 'filter-category', 'filter-assignee', 'filter-importance', 'filter-status']) {
     $(id).addEventListener('change', () => {
-      if (ui.view !== 'statistics') ui.filterStatus[ui.view] = $('filter-status').value;
+      if (ui.view !== 'statistics') {
+        ui.filterStatus[ui.view] = $('filter-status').value;
+        ui.filterAssignee[ui.view] = $('filter-assignee').value;
+      }
       run(loadList);
     });
   }
@@ -580,11 +701,15 @@ function bindUi() {
     run(async () => {
       const input = $('new-title');
       const scope = selectedScope();
-      const period = scope.length === 7 ? scope : null;
-      const { task } = await api('tasks', { title: input.value, period }, 'POST');
+      const period = scope === 'all' || scope === 'none' ? null : scope;
+      const assignee = $('filter-assignee').value;
+      const assigneeId = assignee === 'partner' ? ui.session.partnerId
+        : assignee === 'me' || ui.view === 'day' && assignee === 'all' ? ui.session.userId : null;
+      const importance = ui.view === 'major' ? 'global' : 'low';
+      const { task } = await api('tasks', { title: input.value, period, assigneeId, importance }, 'POST');
       input.value = '';
       const visible = ui.panel === 'list' && ui.view !== 'statistics' ? await loadList() : null;
-      const location = period ? `Задача добавлена. Месяц — ${periodLabel(period)}.` : 'Задача добавлена.';
+      const location = period ? `Задача добавлена. Срок — ${periodLabel(period)}.` : 'Задача добавлена.';
       notify(visible && !visible.some(({ id }) => id === task.id)
         ? `${location} Текущие фильтры скрывают её.` : location);
     }, event.submitter);
@@ -594,6 +719,14 @@ function bindUi() {
     event.preventDefault();
     run(updateTask, event.submitter);
   });
+  $('take-today').addEventListener('click', () => run(async () => {
+    const task = ui.task;
+    const request = ui.cardRequest;
+    const { currentDay } = await api('session');
+    await api(`tasks/${task.id}`, { version: task.version, period: currentDay, assigneeId: ui.session.userId }, 'PATCH');
+    if (request === ui.cardRequest) await openTask(task.id);
+    notify('Задача в вашем списке на сегодня.');
+  }, $('take-today')));
   $('detach-subtask').addEventListener('click', () => run(async () => {
     const task = ui.task;
     const request = ui.cardRequest;
@@ -611,16 +744,21 @@ function bindUi() {
     notify('Подзадача удалена.');
   }, $('delete-subtask')));
   $('edit-category').addEventListener('change', () => toggleCategoryInput('edit-category', 'new-category-field', 'new-category'));
+  $('edit-schedule').addEventListener('change', () => toggleSchedule('edit'));
   $('edit-parent').addEventListener('change', updateImportanceChoices);
   $('child-options').addEventListener('invalid', () => { $('child-options').open = true; }, true);
   $('child-category').addEventListener('change', () => toggleCategoryInput('child-category', 'child-category-new-field', 'child-category-new'));
+  $('child-schedule').addEventListener('change', () => toggleSchedule('child'));
   $('add-child').addEventListener('submit', (event) => {
     event.preventDefault();
     run(async () => {
       const parentId = ui.task.id;
       const request = ui.cardRequest;
       const category = $('child-category').value;
-      const body = { title: $('child-title').value, parentId, period: $('child-period').value || null };
+      const body = {
+        title: $('child-title').value, parentId, period: scheduleValue('child'),
+        assigneeId: Number($('child-assignee').value) || null,
+      };
       if (category !== 'inherit') body.categoryChoice = categoryChoice(category, 'child-category-new');
       await api('tasks', body, 'POST');
       if (request === ui.cardRequest) await openTask(parentId);
@@ -634,7 +772,12 @@ function bindUi() {
       const action = item.dataset.review;
       if (action === 'move') {
         $('review-move').hidden = !$('review-move').hidden;
-        $('review-month').value = ui.review.task.period;
+        const period = ui.review.task.period;
+        const input = $('review-month');
+        input.type = period.length === 10 ? 'date' : period.length === 4 ? 'number' : 'month';
+        input.min = period.length === 4 ? '1000' : '';
+        input.max = period.length === 4 ? '9999' : '';
+        input.value = period;
         return;
       }
       return reviewAction(action === 'skip' ? null : { status: action });
@@ -685,6 +828,9 @@ function bindUi() {
     if (!document.hidden && ui.panel === 'list') run(loadList);
     if (!document.hidden && ui.panel === 'labels') run(renderLabels);
   });
+  setInterval(() => {
+    if (!document.hidden && ui.panel === 'list' && ui.view === 'day') loadList().catch(() => {});
+  }, 60_000);
 }
 
 async function init() {
@@ -695,13 +841,15 @@ async function init() {
   }
   try {
     ui.session = await api('session');
+    ui.today = ui.session.currentDay;
+    $('scope-day').value = ui.today;
     $('scope-month').value = ui.session.currentPeriod;
     $('scope-year').value = ui.session.currentPeriod.slice(0, 4);
     $('entry').hidden = true;
     $('settings').hidden = false;
     $('workspace').hidden = false;
     bindUi();
-    await changeView('backlog');
+    await changeView('day');
   } catch (error) {
     if ($('entry').hidden) notify(error.message, true);
     else $('entry').textContent = error.message;

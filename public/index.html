@@ -18,13 +18,16 @@
     <section id="entry" aria-live="polite"><p>Загружаем задачи…</p></section>
     <div id="workspace" hidden>
       <nav aria-label="Разделы" class="tabs">
-        <button type="button" data-view="backlog">Бэклог</button>
-        <button type="button" data-view="periods">Периоды</button>
+        <button type="button" data-view="day">День</button>
+        <button type="button" data-view="month">Месяц</button>
+        <button type="button" data-view="year">Год</button>
+        <button type="button" data-view="unscheduled">Без срока</button>
+        <button type="button" data-view="major">Крупные</button>
         <button type="button" data-view="statistics">Статистика</button>
       </nav>
       <section id="list-view">
         <div class="heading">
-          <h1 id="view-title">Бэклог</h1>
+          <h1 id="view-title">День</h1>
           <button id="review-start" type="button" hidden>Разобрать</button>
         </div>
         <form id="quick-add" class="quick-add">
@@ -35,8 +38,8 @@
           <label id="period-mode-label" hidden>Период
             <select id="period-mode"><option value="month">Месяц</option><option value="year">Год</option></select>
           </label>
-          <label id="backlog-scope-label">Период
-            <select id="backlog-scope"><option value="all">Все месяцы</option><option value="none">Без месяца</option><option value="month">Выбрать месяц</option></select>
+          <label id="scope-day-label" hidden>День
+            <input id="scope-day" type="date">
           </label>
           <label id="scope-month-label" hidden>Месяц
             <input id="scope-month" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])">
@@ -49,16 +52,26 @@
           </label>
           <label data-task-filter>Поиск<input id="filter-query" type="search" placeholder="Название"></label>
           <label data-task-filter>Категория<select id="filter-category"><option value="">Все</option></select></label>
+          <label data-task-filter>Кому
+            <select id="filter-assignee">
+              <option value="all">Всем</option><option value="me">Мне</option>
+              <option value="partner">Партнёру</option><option value="none">Без назначения</option>
+            </select>
+          </label>
           <label data-task-filter>Важность
             <select id="filter-importance">
               <option value="">Любая</option><option value="low">Низкая</option>
               <option value="medium">Средняя</option><option value="high">Важная</option>
-              <option value="global">Глобальная</option>
             </select>
           </label>
         </div>
         <div id="stats" class="stats" hidden></div>
         <div id="year-grid" class="year-grid" hidden></div>
+        <section id="carryover" class="carryover" hidden>
+          <h2>Незавершённые с прошлых дней</h2>
+          <div id="carryover-list" class="task-list"></div>
+        </section>
+        <p id="day-rollover-note" class="day-rollover-note" hidden>Остались задачи на сегодня. Кнопка ↪ переносит их на завтра.</p>
         <p id="list-empty" class="empty" hidden></p>
         <div id="task-list" class="task-list" aria-live="polite"></div>
       </section>
@@ -70,11 +83,19 @@
           <span id="task-priority"></span>
           <span id="task-status-label" class="status-label" hidden></span>
           <div id="task-status-actions" class="task-status-actions"></div>
+          <button id="take-today" type="button" hidden>Взять на сегодня</button>
         </div>
         <form id="task-editor" class="card editor">
           <label class="wide">Название<input id="edit-title" maxlength="200" required></label>
-          <label>Месяц<input id="edit-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
+          <label>Срок<select id="edit-schedule">
+            <option value="">Без срока</option><option value="day">День</option>
+            <option value="month">Месяц</option><option value="year">Год</option>
+          </select></label>
+          <label id="edit-day-label" hidden>Дата<input id="edit-day" type="date" disabled></label>
+          <label id="edit-month-label" hidden>Месяц<input id="edit-month" type="month" disabled></label>
+          <label id="edit-year-label" hidden>Год<input id="edit-year" type="number" min="1000" max="9999" disabled></label>
           <label>Категория<select id="edit-category"></select></label>
+          <label>Кому<select id="edit-assignee"></select></label>
           <label id="new-category-field" class="wide" hidden>Название новой категории
             <input id="new-category" maxlength="60" required disabled>
           </label>
@@ -105,7 +126,14 @@
               <summary>Параметры подзадачи</summary>
               <div class="editor">
                 <label>Категория подзадачи<select id="child-category"></select></label>
-                <label>Месяц подзадачи<input id="child-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
+                <label>Кому<select id="child-assignee"></select></label>
+                <label>Срок подзадачи<select id="child-schedule">
+                  <option value="">Без срока</option><option value="day">День</option>
+                  <option value="month">Месяц</option><option value="year">Год</option>
+                </select></label>
+                <label id="child-day-label" hidden>Дата<input id="child-day" type="date" disabled></label>
+                <label id="child-month-label" hidden>Месяц<input id="child-month" type="month" disabled></label>
+                <label id="child-year-label" hidden>Год<input id="child-year" type="number" min="1000" max="9999" disabled></label>
                 <label id="child-category-new-field" class="wide" hidden>Название новой категории
                   <input id="child-category-new" maxlength="60" required disabled>
                 </label>
@@ -132,9 +160,9 @@
             <button class="quiet" data-review="skip" type="button">Оставить</button>
           </div>
           <form id="review-move" class="quick-add" hidden>
-            <input id="review-month" type="month" aria-label="Новый месяц" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])" required>
+            <input id="review-month" type="month" aria-label="Новый срок" required>
             <button class="primary" type="submit">Перенести</button>
-            <button id="review-clear" type="button">Убрать месяц</button>
+            <button id="review-clear" type="button">Убрать срок</button>
           </form>
         </div>
       </section>

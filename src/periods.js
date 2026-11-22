@@ -16,8 +16,15 @@ export class InputError extends Error {
 }
 
 export function currentPeriod(timeZone, now = new Date()) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit' })
-    .format(now).slice(0, 7);
+  return currentDay(timeZone, now).slice(0, 7);
+}
+
+export function currentDay(timeZone, now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+export function localHour(timeZone, now = new Date()) {
+  return Number(new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', hourCycle: 'h23' }).format(now));
 }
 
 export function exactPeriod(value) {
@@ -32,6 +39,23 @@ export function parseYear(value) {
     throw new InputError('Укажите год четырьмя цифрами, например 2026.');
   }
   return value;
+}
+
+export function exactDay(value) {
+  if (typeof value !== 'string' || !/^[1-9]\d{3}-\d{2}-\d{2}$/.test(value)) {
+    throw new InputError('Укажите день в формате ГГГГ-ММ-ДД.');
+  }
+  const date = new Date(`${value}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    throw new InputError('Укажите существующую дату.');
+  }
+  return value;
+}
+
+export function exactSchedule(value) {
+  if (value?.length === 4) return parseYear(value);
+  if (value?.length === 10) return exactDay(value);
+  return exactPeriod(value);
 }
 
 export function parseMonth(value, current) {
@@ -59,13 +83,23 @@ export function shiftMonth(value, offset) {
   return `${nextYear}-${String(next % 12 + 1).padStart(2, '0')}`;
 }
 
+export function shiftDay(value, offset) {
+  const date = new Date(`${exactDay(value)}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + offset);
+  const year = date.getUTCFullYear();
+  return year >= 1000 && year <= 9999 ? date.toISOString().slice(0, 10) : null;
+}
+
 export function labelPeriod(value) {
-  if (!value) return 'Без месяца';
+  if (!value) return 'Без срока';
+  if (value.length === 4) return value;
+  if (value.length === 10) return new Intl.DateTimeFormat('ru-RU', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+  }).format(new Date(`${value}T00:00:00Z`));
   return `${months[Number(value.slice(5)) - 1]} ${value.slice(0, 4)}`;
 }
 
 export function parseScope(value) {
   if (value === 'all' || value === 'none') return value;
-  if (value?.length === 4) return parseYear(value);
-  return exactPeriod(value);
+  return exactSchedule(value);
 }

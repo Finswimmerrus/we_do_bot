@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { exactPeriod, InputError, parseScope } from './periods.js';
+import { exactDay, exactSchedule, InputError, parseScope } from './periods.js';
 
 export const statuses = { active: 'Активна', done: 'Выполнена', obsolete: 'Неактуальна' };
 export const importanceLevels = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
@@ -18,7 +18,7 @@ export const categoryIcons = {
 
 const taskFields = `
   SELECT t.id, t.title, t.status, t.period, t.category,
-    t.importance, t.tags, t.parent_id AS parentId,
+    t.importance, t.tags, t.assignee_id AS assigneeId, t.parent_id AS parentId,
     p.title AS parentTitle, t.created_by AS createdBy, t.created_at AS createdAt,
     t.completed_at AS completedAt, t.version
   FROM tasks AS t LEFT JOIN tasks AS p ON p.id = t.parent_id
@@ -40,6 +40,7 @@ function taskTable(name) {
     version INTEGER NOT NULL DEFAULT 1,
     source TEXT,
     importance TEXT NOT NULL DEFAULT 'low' CHECK (importance IN ('low', 'medium', 'high', 'global')),
+    assignee_id INTEGER REFERENCES members(user_id),
     UNIQUE (space_id, source),
     UNIQUE (space_id, id),
     FOREIGN KEY (space_id, parent_id) REFERENCES ${name}(space_id, id)
@@ -96,6 +97,15 @@ function labelColor(value) {
 
 function isId(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function checkImportance(value, parentId) {
+  if (typeof value !== 'string' || !Object.hasOwn(importanceLevels, value)) {
+    throw new InputError('Выберите важность задачи.');
+  }
+  if (value === 'global' && parentId !== null) {
+    throw new InputError('Глобальная важность доступна только задачам верхнего уровня.');
+  }
 }
 
 export function taskStats(tasks) {
@@ -168,6 +178,7 @@ export class Store {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS tasks_by_period ON tasks(space_id, period, status);
       CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks(space_id, parent_id);
+      CREATE INDEX IF NOT EXISTS tasks_by_assignee ON tasks(assignee_id, period, status);
     `);
   }
 
@@ -243,6 +254,18 @@ export class Store {
       FROM members AS m JOIN spaces AS s ON s.id = m.space_id WHERE m.user_id = ?
     `).get(user);
     return space ?? null;
+  }
+
+  members(space) {
+    return this.db.prepare('SELECT user_id AS id FROM members WHERE space_id = ? ORDER BY slot').all(space);
+  }
+
+  #assignee(space, value) {
+    if (value === null) return null;
+    if (!isId(value) || !this.db.prepare('SELECT 1 FROM members WHERE space_id = ? AND user_id = ?').get(space, value)) {
+      throw new InputError('Выберите участника вашего пространства.');
+    }
+    return value;
   }
 
   joinOrCreate(user, invite = '', confirmedSpace = null) {
@@ -329,14 +352,14 @@ export class Store {
   }
 
   #migrateSchema() {
-    if (this.db.prepare('PRAGMA user_version').get().user_version >= 4) return;
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 5) return;
     const { sql } = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").get();
     const rebuildTasks = !/\bAUTOINCREMENT\b/i.test(sql);
     if (rebuildTasks) this.db.exec('PRAGMA foreign_keys = OFF');
     try {
       this.transaction(() => {
         const version = this.db.prepare('PRAGMA user_version').get().user_version;
-        if (version >= 4) return;
+        if (version >= 5) return;
         if (version < 2) {
           if (!this.db.prepare('PRAGMA table_info(tasks)').all().some(({ name }) => name === 'importance')) {
             this.db.exec(`ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
@@ -352,8 +375,11 @@ export class Store {
             WHERE child.parent_id IS NOT NULL;
           `);
         }
+        if (!this.db.prepare('PRAGMA table_info(tasks)').all().some(({ name }) => name === 'assignee_id')) {
+          this.db.exec('ALTER TABLE tasks ADD COLUMN assignee_id INTEGER REFERENCES members(user_id)');
+        }
         if (rebuildTasks) this.#migrateTaskIds();
-        this.db.exec('PRAGMA user_version = 4');
+        this.db.exec('PRAGMA user_version = 5');
       });
     } finally {
       if (rebuildTasks) this.db.exec('PRAGMA foreign_keys = ON');
@@ -361,7 +387,7 @@ export class Store {
   }
 
   #migrateTaskIds() {
-    const columns = 'id, space_id, title, status, period, category, tags, parent_id, created_by, created_at, completed_at, version, source, importance';
+    const columns = 'id, space_id, title, status, period, category, tags, parent_id, created_by, created_at, completed_at, version, source, importance, assignee_id';
     this.db.exec(`
       ${taskTable('new_tasks')}
       INSERT INTO new_tasks (${columns}) SELECT ${columns} FROM tasks;
@@ -487,16 +513,16 @@ export class Store {
       .all(space, id).map(asTask);
   }
 
-  #insertTask(space, user, { title, parentId = null, period = null, category = null, source = null }) {
+  #insertTask(space, user, { title, parentId = null, period = null, category = null, assigneeId = null, importance = 'low', source = null }) {
     const { lastInsertRowid } = this.db.prepare(`
-      INSERT INTO tasks (space_id, title, parent_id, period, category, created_by, created_at, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(space, title, parentId, period, category, user, new Date().toISOString(), source);
+      INSERT INTO tasks (space_id, title, parent_id, period, category, assignee_id, importance, created_by, created_at, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(space, title, parentId, period, category, assigneeId, importance, user, new Date().toISOString(), source);
     return Number(lastInsertRowid);
   }
 
   createTask(space, user, input, source = null) {
-    const { title, parentId = null, period = null } = input;
+    const { title, parentId = null, period = null, assigneeId = null, importance = 'low' } = input;
     const name = taskTitle(title);
     return this.transaction(() => {
       if (source) {
@@ -508,8 +534,11 @@ export class Store {
         throw new InputError('Подзадачу можно добавить только к задаче верхнего уровня.');
       }
       const category = this.#categoryFromInput(space, input, parent?.category ?? null);
-      const taskPeriod = period === null ? null : exactPeriod(period);
-      return this.task(space, this.#insertTask(space, user, { title: name, parentId, period: taskPeriod, category, source }));
+      const taskPeriod = period === null ? null : exactSchedule(period);
+      checkImportance(importance, parentId);
+      return this.task(space, this.#insertTask(space, user, {
+        title: name, parentId, period: taskPeriod, category, assigneeId: this.#assignee(space, assigneeId), importance, source,
+      }));
     });
   }
 
@@ -570,15 +599,8 @@ export class Store {
         }
         task.parentId = patch.parentId;
       }
-      if ('importance' in patch) {
-        if (typeof patch.importance !== 'string' || !Object.hasOwn(importanceLevels, patch.importance)) {
-          throw new InputError('Выберите важность задачи.');
-        }
-        task.importance = patch.importance;
-      }
-      if (task.parentId !== null && task.importance === 'global') {
-        throw new InputError('Глобальная важность доступна только задачам верхнего уровня.');
-      }
+      if ('importance' in patch) task.importance = patch.importance;
+      checkImportance(task.importance, task.parentId);
       if ('title' in patch) task.title = taskTitle(patch.title);
       if ('status' in patch) {
         if (typeof patch.status !== 'string' || !Object.hasOwn(statuses, patch.status)) {
@@ -598,7 +620,8 @@ export class Store {
           task.completedAt = task.status === 'done' ? new Date().toISOString() : null;
         }
       }
-      if ('period' in patch) task.period = patch.period === null ? null : exactPeriod(patch.period);
+      if ('period' in patch) task.period = patch.period === null ? null : exactSchedule(patch.period);
+      if ('assigneeId' in patch) task.assigneeId = this.#assignee(space, patch.assigneeId);
       task.category = this.#categoryFromInput(space, patch, task.category);
       if ('tagChoices' in patch) {
         if (!Array.isArray(patch.tagChoices) || patch.tagChoices.length > 20) {
@@ -609,22 +632,30 @@ export class Store {
         task.tags = this.#namesForTags(space, cleanTags(patch.tags));
       }
       this.db.prepare(`
-        UPDATE tasks SET title = ?, status = ?, period = ?, category = ?, importance = ?, tags = ?, parent_id = ?,
+        UPDATE tasks SET title = ?, status = ?, period = ?, category = ?, importance = ?, tags = ?, parent_id = ?, assignee_id = ?,
           completed_at = ?, version = version + 1 WHERE space_id = ? AND id = ?
       `).run(task.title, task.status, task.period, task.category, task.importance, JSON.stringify(task.tags),
-        task.parentId, task.completedAt, space, id);
+        task.parentId, task.assigneeId, task.completedAt, space, id);
       return this.task(space, id);
     });
   }
 
-  list(space, { scope = 'all', status = 'all', query = '', category = '', tag = '', importance = '' } = {}) {
+  list(space, {
+    scope = 'all', status = 'all', query = '', category = '', categoryId, tag = '', importance = '', view = '', assigneeId,
+  } = {}) {
     parseScope(scope);
     if (status !== 'all' && !Object.hasOwn(statuses, status)) throw new InputError('Выберите статус задачи.');
     const filters = ['t.space_id = ?'];
     const args = [space];
-    if (scope === 'none') filters.push('t.period IS NULL');
+    if (view === 'major') filters.push("t.importance = 'global'");
+    else if (view) filters.push("t.importance != 'global'");
+    if (view === 'carryover') {
+      filters.push("length(t.period) = 10 AND t.period < ?");
+      args.push(exactDay(scope));
+    } else if (scope === 'none') filters.push('t.period IS NULL');
     else if (scope !== 'all') {
-      filters.push(scope.length === 4 ? 'substr(t.period, 1, 4) = ?' : 't.period = ?');
+      const range = scope.length === 4 && view !== 'year' || scope.length === 7 && view === 'statistics';
+      filters.push(range ? `substr(t.period, 1, ${scope.length}) = ?` : 't.period = ?');
       args.push(scope);
     }
     if (status !== 'all') {
@@ -635,6 +666,15 @@ export class Store {
       if (!Object.hasOwn(importanceLevels, importance)) throw new InputError('Выберите важность задачи.');
       filters.push('t.importance = ?');
       args.push(importance);
+    }
+    if (assigneeId !== undefined) {
+      filters.push('t.assignee_id IS ?');
+      args.push(assigneeId);
+    }
+    if (categoryId !== undefined) {
+      if (!isId(categoryId)) throw new InputError('Выберите категорию из списка.');
+      filters.push("EXISTS (SELECT 1 FROM labels WHERE id = ? AND space_id = t.space_id AND kind = 'category' AND name = t.category)");
+      args.push(categoryId);
     }
     const term = query.trim().toLowerCase();
     const rows = this.db.prepare(`${taskFields} WHERE ${filters.join(' AND ')} ORDER BY t.id DESC`).all(...args);

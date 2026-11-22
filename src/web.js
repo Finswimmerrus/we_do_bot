@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { currentPeriod, InputError } from './periods.js';
+import { currentDay, localHour, InputError } from './periods.js';
 import { categoryIcons, taskStats } from './store.js';
 
 const assets = new Map([
@@ -57,13 +57,18 @@ async function bodyOf(request) {
   return data;
 }
 
-function queryOptions(url) {
+function queryOptions(url, user, partner) {
   const options = Object.fromEntries(url.searchParams);
-  const { scope, status, query, category, tag, importance } = options;
-  return { scope, status, query, category, tag, importance };
+  const { scope, status, query, category, categoryId, tag, importance, view, assignee } = options;
+  const assigneeIds = { me: user, partner: partner ?? -1, none: null, all: undefined };
+  if (assignee && !Object.hasOwn(assigneeIds, assignee)) throw new InputError('Выберите ответственного.');
+  return {
+    scope, status, query, category, categoryId: categoryId ? Number(categoryId) : undefined,
+    tag, importance, view, assigneeId: assigneeIds[assignee || 'all'],
+  };
 }
 
-export function webServer({ store, token, username, timeZone }) {
+export function webServer({ store, token, username, timeZone, dailyReviewHour = 21, now = () => new Date() }) {
   return createServer(async (request, response) => {
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('referrer-policy', 'no-referrer');
@@ -83,10 +88,15 @@ export function webServer({ store, token, username, timeZone }) {
       if (!user) throw new InputError('Откройте приложение из личного чата с ботом.', 401);
       const space = store.spaceFor(user);
       if (!space) throw new InputError('Сначала отправьте боту команду /start.', 403);
+      const partner = store.members(space.id).find(({ id }) => id !== user)?.id;
 
       if (pathname === '/api/session' && request.method === 'GET') {
+        const today = currentDay(timeZone, now());
         return sendJson(response, 200, {
-          currentPeriod: currentPeriod(timeZone),
+          currentPeriod: today.slice(0, 7),
+          currentDay: today,
+          userId: user,
+          partnerId: partner ?? null,
           partnerJoined: space.memberCount === 2,
           groupLinked: space.groupChat !== null,
           invite: space.invite ? `https://t.me/${username}?start=${space.invite}` : null,
@@ -112,7 +122,8 @@ export function webServer({ store, token, username, timeZone }) {
         }
       }
       if (pathname === '/api/tasks' && request.method === 'GET') {
-        const tasks = store.list(space.id, queryOptions(url));
+        const options = queryOptions(url, user, partner);
+        const tasks = store.list(space.id, options);
         const include = searchParams.get('include');
         if (include !== 'summary' && include !== 'catalog') return sendJson(response, 200, { tasks });
         const catalog = store.catalog(space.id);
@@ -120,13 +131,22 @@ export function webServer({ store, token, username, timeZone }) {
           categories: catalog.categories.map(({ name }) => name),
           tags: catalog.tags.map(({ name }) => name),
         };
-        if (include === 'catalog') return sendJson(response, 200, { tasks, catalog, suggestions });
+        if (include === 'catalog') {
+          const clock = now();
+          const today = currentDay(timeZone, clock);
+          const carryover = options.view === 'day' && options.scope === today && options.status !== 'done' && options.status !== 'obsolete'
+            ? store.list(space.id, { ...options, view: 'carryover', status: 'active' }) : [];
+          return sendJson(response, 200, {
+            tasks, catalog, suggestions, carryover, today, partnerId: partner ?? null,
+            dayFinished: localHour(timeZone, clock) >= dailyReviewHour,
+          });
+        }
         const scope = searchParams.get('scope') ?? 'all';
-        const periodTasks = store.list(space.id, { scope });
+        const periodTasks = store.list(space.id, { scope, view: options.view });
         const monthStats = scope.length === 4
           ? Object.fromEntries(Array.from({ length: 12 }, (_, index) => {
             const period = `${scope}-${String(index + 1).padStart(2, '0')}`;
-            return [period, taskStats(periodTasks.filter((task) => task.period === period))];
+            return [period, taskStats(periodTasks.filter((task) => task.period?.startsWith(period)))];
           }))
           : null;
         return sendJson(response, 200, { tasks, stats: taskStats(periodTasks), monthStats, catalog, suggestions });

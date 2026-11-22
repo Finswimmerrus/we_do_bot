@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
-import { currentPeriod, exactPeriod, InputError, labelPeriod, months, parseMonth, parseScope, parseYear, shiftMonth } from './periods.js';
+import {
+  currentDay, currentPeriod, exactDay, exactSchedule, InputError, labelPeriod, months, parseMonth, parseScope, parseYear,
+  shiftDay, shiftMonth,
+} from './periods.js';
 import { categoryIcons, importanceLevels, taskStats } from './store.js';
 import { maxVoiceBytes, maxVoiceSeconds, tasksFromSpeech } from './voice.js';
 
@@ -16,8 +19,10 @@ const commands = {
   start: 'Открыть пространство пары',
   task: 'Добавить задачу',
   backlog: 'Показать бэклог',
+  day: 'Задачи на день',
   month: 'Задачи месяца',
   year: 'Итоги года',
+  major: 'Крупные задачи',
   review: 'Разобрать задачи месяца или года',
   invite: 'Пригласить партнёра',
   link: 'Подключить общий чат',
@@ -112,7 +117,14 @@ function activeSubtaskWarning(count) {
 }
 
 function matches(task, scope) {
-  return task.status === 'active' && Boolean(task.period?.startsWith(scope));
+  return task.status === 'active' && task.importance !== 'global' && Boolean(task.period?.startsWith(scope));
+}
+
+function shiftSchedule(period, step) {
+  if (period.length === 10) return shiftDay(period, step);
+  if (period.length === 7) return shiftMonth(period, step);
+  const year = Number(period) + step;
+  return year >= 1000 && year <= 9999 ? String(year) : null;
 }
 
 function readCommand(message, username) {
@@ -164,7 +176,8 @@ export class Bot {
   homeRows(message) {
     return [
       [button('＋ Добавить задачу', 'add'), button('Бэклог', 'l:all:active:0')],
-      [button('Текущий месяц', `l:${this.period}:all:0`), button('Текущий год', `y:${this.period.slice(0, 4)}`)],
+      [button('Сегодня', `l:${currentDay(this.timeZone, this.now())}:active:0`), button('Текущий месяц', `l:${this.period}:all:0`)],
+      [button('Текущий год', `y:${this.period.slice(0, 4)}`), button('Крупные', 'l:major:active:0')],
       this.appButton(message),
     ];
   }
@@ -318,8 +331,8 @@ export class Bot {
     }
     if (name === 'help') {
       return this.send(message, [
-        '/task Купить билеты', '/backlog · /backlog без месяца · /backlog октябрь 2026',
-        '/month · /month 10 2026', '/year · /year 2026', '/review · /review октябрь · /review year 2026',
+        '/task Купить билеты', '/backlog · /backlog без срока · /backlog октябрь 2026',
+        '/day · /day 2026-11-22 · /major', '/month · /month 10 2026', '/year · /year 2026', '/review · /review октябрь · /review year 2026',
         '/invite в личном чате · /link в общем чате · /unlink',
       ].join('\n'));
     }
@@ -341,9 +354,11 @@ export class Bot {
       case 'task': return args ? this.addTask(ctx, args) : this.promptForTask(ctx);
       case 'backlog': {
         const normalized = args.toLowerCase().replace(/\s+/g, ' ');
-        const scope = !args ? 'all' : normalized === 'без месяца' ? 'none' : parseMonth(args, this.period);
+        const scope = !args ? 'all' : ['без месяца', 'без срока'].includes(normalized) ? 'none' : parseMonth(args, this.period);
         return this.showList(ctx, scope, 'active', 0);
       }
+      case 'day': return this.showList(ctx, args ? exactDay(args) : currentDay(this.timeZone, this.now()), 'active', 0);
+      case 'major': return this.showList(ctx, 'major', 'active', 0);
       case 'month': return this.showList(ctx, parseMonth(args, this.period), 'all', 0);
       case 'year': return this.showYear(ctx, parseYear(args || this.period.slice(0, 4)));
       case 'review': {
@@ -382,13 +397,15 @@ export class Bot {
   }
 
   async showList(ctx, scope, status, page) {
-    parseScope(scope);
-    const list = this.store.list(ctx.space.id, { scope, status });
+    const major = scope === 'major';
+    const view = major ? 'major' : scope.length === 4 && scope !== 'none' ? 'year' : 'common';
+    const filterScope = major ? 'all' : parseScope(scope);
+    const list = this.store.list(ctx.space.id, { scope: filterScope, status, view });
     const endPage = Math.max(0, Math.ceil(list.length / pageSize) - 1);
     const current = Math.min(endPage, Math.max(0, page || 0));
     const visible = list.slice(current * pageSize, (current + 1) * pageSize);
-    const lines = [scope === 'all' ? 'Бэклог' : labelPeriod(scope === 'none' ? null : scope)];
-    if (scope.length === 7) lines.push(statsLine(taskStats(this.store.list(ctx.space.id, { scope }))));
+    const lines = [major ? 'Крупные задачи' : scope === 'all' ? 'Бэклог' : labelPeriod(scope === 'none' ? null : scope)];
+    if (scope.length === 7) lines.push(statsLine(taskStats(this.store.list(ctx.space.id, { scope, view }))));
     const entities = [];
     let offset = lines.join('\n\n').length + 2;
     const taskLines = visible.map((task) => {
@@ -419,9 +436,17 @@ export class Bot {
         ...(next ? [button('Месяц ›', `l:${next}:${status}:0`)] : []),
       ], [button('Разобрать месяц', `r:${scope}`)]);
     }
+    if (scope.length === 10) {
+      const previous = shiftDay(scope, -1);
+      const next = shiftDay(scope, 1);
+      rows.push([
+        ...(previous ? [button('‹ День', `l:${previous}:${status}:0`)] : []),
+        ...(next ? [button('День ›', `l:${next}:${status}:0`)] : []),
+      ]);
+    }
     rows.push([
-      button('Все месяцы', `l:all:${status}:0`),
-      button('Без месяца', `l:none:${status}:0`),
+      button('Бэклог', `l:all:${status}:0`),
+      button('Без срока', `l:none:${status}:0`),
       button('Текущий месяц', `l:${this.period}:${status}:0`),
     ], this.appButton(ctx.message));
     return this.show(ctx, lines.join('\n\n'), rows, entities);
@@ -429,11 +454,11 @@ export class Bot {
 
   async showYear(ctx, year) {
     parseYear(year);
-    const list = this.store.list(ctx.space.id, { scope: year });
+    const list = this.store.list(ctx.space.id, { scope: year, view: 'statistics' });
     const lines = [`Итоги ${year}`, statsLine(taskStats(list))];
     const calendar = months.map((month, index) => {
       const period = `${year}-${String(index + 1).padStart(2, '0')}`;
-      const stats = taskStats(list.filter((task) => task.period === period));
+      const stats = taskStats(list.filter((task) => task.period.startsWith(period)));
       if (stats.total) lines.push(`${month}: ${stats.done} выполнено, ${stats.active} активно, ${stats.obsolete} неактуально`);
       return button(month, `l:${period}:all:0`);
     });
@@ -442,7 +467,7 @@ export class Bot {
       ...(Number(year) > 1000 ? [button('‹ Пред. год', `y:${Number(year) - 1}`)] : []),
       button('Разобрать год', `r:${year}`),
       ...(Number(year) < 9999 ? [button('След. год ›', `y:${Number(year) + 1}`)] : []),
-    ], this.appButton(ctx.message));
+    ], [button('Задачи на год', `l:${year}:all:0`)], this.appButton(ctx.message));
     return this.show(ctx, lines.join('\n'), rows);
   }
 
@@ -452,6 +477,7 @@ export class Bot {
     const lines = [task.title, labelPeriod(task.period), `${importanceSymbols[task.importance]} ${importanceLevels[task.importance]}`];
     if (task.status === 'obsolete') lines.push('Отменена');
     if (task.parentTitle) lines.push(`Подзадача к «${task.parentTitle}»`);
+    if (ctx.private && task.assigneeId) lines.push(task.assigneeId === ctx.user ? 'Назначена вам' : 'Назначена партнёру');
     if (children.total) {
       if (children.done + children.active) {
         lines.push(`Подзадачи: ${children.done} из ${children.done + children.active} выполнено · ${children.active} активно`);
@@ -481,11 +507,10 @@ export class Bot {
   }
 
   startReview(ctx, scope) {
-    if (scope.length === 4) parseYear(scope);
-    else exactPeriod(scope);
+    exactSchedule(scope);
     const key = randomBytes(6).toString('base64url');
     this.reviews.set(key, {
-      scope, ids: this.store.list(ctx.space.id, { scope, status: 'active' }).map((task) => task.id),
+      scope, ids: this.store.list(ctx.space.id, { scope, status: 'active', view: 'statistics' }).map((task) => task.id),
       user: ctx.user, chat: ctx.message.chat.id, space: ctx.space.id, expires: Date.now() + reviewLifetime,
     });
     return this.showReview(ctx, key);
@@ -515,18 +540,21 @@ export class Bot {
     const text = `Разбор · ${scopeName}\n\n${brief(task, 350)}\nОсталось в этом проходе: ${review.ids.length}`;
     const prefix = `a:${key}:${task.id}:${task.version}`;
     if (target) {
-      exactPeriod(target);
+      exactSchedule(target);
+      const steps = target.length === 10 ? [[-7, '‹ Нед.'], [-1, '‹ День'], [1, 'День ›'], [7, 'Нед. ›']]
+        : target.length === 4 ? [[-1, '‹ Год'], [1, 'Год ›']]
+          : [[-12, '‹ Год'], [-1, '‹ Месяц'], [1, 'Месяц ›'], [12, 'Год ›']];
       return this.show(ctx, `${text}\n\nПеренести в ${labelPeriod(target)}?`, [
-        [-12, -1, 1, 12].map((step, index) => {
-          const period = shiftMonth(target, step);
-          return period && button(['‹ Год', '‹ Месяц', 'Месяц ›', 'Год ›'][index], `${prefix}:pick:${period}`);
+        steps.map(([step, label]) => {
+          const period = shiftSchedule(target, step);
+          return period && button(label, `${prefix}:pick:${period}`);
         }).filter(Boolean),
-        [button('Перенести', `${prefix}:move:${target}`), button('Убрать месяц', `${prefix}:move:none`)],
+        [button('Перенести', `${prefix}:move:${target}`), button('Убрать срок', `${prefix}:move:none`)],
         [button('‹ Назад', `${prefix}:back`)],
       ]);
     }
     return this.show(ctx, text, [
-      [button('Перенести', `${prefix}:pick:${shiftMonth(task.period, 1) ?? task.period}`)],
+      [button('Перенести', `${prefix}:pick:${shiftSchedule(task.period, 1) ?? task.period}`)],
       [button(statusActions.done.label, `${prefix}:done`), button(statusActions.obsolete.label, `${prefix}:obsolete`),
         button('Оставить', `${prefix}:skip`)],
     ]);
@@ -543,12 +571,12 @@ export class Bot {
       await this.showReview(ctx, key);
       return 'Список обновлён.';
     }
-    if (action === 'pick') return void await this.showReview(ctx, key, exactPeriod(target));
+    if (action === 'pick') return void await this.showReview(ctx, key, exactSchedule(target));
     if (action === 'back') return void await this.showReview(ctx, key);
     try {
       if (action === 'move') {
-        const period = target === 'none' ? null : exactPeriod(target);
-        if (period === task.period) throw new InputError('Выберите другой месяц или оставьте задачу.');
+        const period = target === 'none' ? null : exactSchedule(target);
+        if (period === task.period) throw new InputError('Выберите другой срок или оставьте задачу.');
         this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, { version: task.version, period }));
       } else if (action === 'done' || action === 'obsolete') {
         this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, {

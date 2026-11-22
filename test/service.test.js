@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Bot, poll } from '../src/bot.js';
-import { currentPeriod, parseMonth } from '../src/periods.js';
+import { currentPeriod, exactDay, parseMonth, shiftDay } from '../src/periods.js';
 import { Store, taskStats } from '../src/store.js';
 import { webServer } from '../src/web.js';
 
@@ -64,6 +64,9 @@ test('текущий, предыдущий и ближайший будущий 
   assert.equal(parseMonth('декабрь', '2027-01'), '2026-12');
   assert.equal(parseMonth('ноябрь', '2027-01'), '2027-11');
   assert.throws(() => parseMonth('13 2026', '2026-11'));
+  assert.equal(shiftDay('2026-12-31', 1), '2027-01-01');
+  assert.equal(shiftDay('2028-02-28', 1), '2028-02-29');
+  assert.throws(() => exactDay('2026-02-29'));
 });
 
 test('личный и связанный общий чаты используют один бэклог пары', async (t) => {
@@ -375,7 +378,7 @@ test('перенос базы со схемы 3 сохраняет связи и
 });
 
 test('Mini App копирует категорию при создании и сохраняет свой период подзадачи', async (t) => {
-  const { store, receive, last } = setup(t);
+  const { store, receive, click, last } = setup(t);
   await receive(11, '/start');
   await receive(22, `/start ${store.spaceFor(11).invite}`);
   await receive(33, '/start');
@@ -435,10 +438,13 @@ test('Mini App копирует категорию при создании и с
   await receive(11, '/backlog октябрь');
   assert.match(last('sendMessage').text, /Билеты · к «Поездка»/);
   await receive(11, '/month ноябрь');
-  const monthReport = last('sendMessage');
-  assert.match(monthReport.text, /Выполнено 1/);
-  const [completedTitle] = monthReport.entities;
-  assert.equal(monthReport.text.slice(completedTitle.offset, completedTitle.offset + completedTitle.length), 'Поездка');
+  assert.doesNotMatch(last('sendMessage').text, /Поездка/);
+  await receive(11, '/major');
+  const showCompleted = last('sendMessage').reply_markup.inline_keyboard.flat().find(({ callback_data }) => callback_data === 'l:major:done:0');
+  await click(11, showCompleted.callback_data);
+  const majorReport = last('editMessageText');
+  const [completedTitle] = majorReport.entities;
+  assert.equal(majorReport.text.slice(completedTitle.offset, completedTitle.offset + completedTitle.length), 'Поездка');
 
   const { data: { catalog } } = await call('labels', { initData: signed(11) });
   const [category] = catalog.categories;
@@ -479,4 +485,56 @@ test('Mini App копирует категорию при создании и с
   const { data: { task: globalTask } } = await patch(standalone, { importance: 'global' });
   assert.equal(globalTask.importance, 'global');
   assert.equal((await patch(globalTask, { parentId: parent.id })).code, 400);
+});
+
+test('сроки и крупные задачи разделены, работают фильтры категории и ответственного', async (t) => {
+  const { store, receive, last } = setup(t);
+  await receive(11, '/start');
+  const pair = store.spaceFor(11);
+  await receive(22, '/start ' + pair.invite);
+  await receive(33, '/start');
+  const { id: space } = pair;
+  const bills = store.createLabel(space, { kind: 'category', name: 'Платежи' });
+  const big = store.createTask(space, 11, { title: 'Отпуск', period: '2026-11', importance: 'global' });
+  const today = store.createTask(space, 11, { title: 'Купить билеты', period: '2026-11-22', assigneeId: 11, parentId: big.id });
+  const partner = store.createTask(space, 11, { title: 'Позвонить', period: '2026-11-22', assigneeId: 22, categoryChoice: { id: bills.id } });
+  const late = store.createTask(space, 11, { title: 'Пропущено вчера', period: '2026-11-21', assigneeId: 22, categoryChoice: { id: bills.id } });
+  const month = store.createTask(space, 11, { title: 'Оплатить ЖКХ', period: '2026-11', categoryChoice: { id: bills.id } });
+  const year = store.createTask(space, 11, { title: 'Запланировать ремонт', period: '2026' });
+  const untimed = store.createTask(space, 11, { title: 'Починить полку' });
+  assert.throws(() => store.createTask(space, 11, { title: 'Чужой', assigneeId: 33 }));
+  assert.throws(() => store.createTask(space, 11, { title: 'Подзадача', parentId: big.id, importance: 'global' }));
+
+  const server = webServer({
+    store, token, username: 'test_bot', timeZone: 'Europe/Moscow', now: () => new Date('2026-11-22T18:01:00Z'),
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const get = async (path, user = 11) => {
+    const response = await fetch(origin + '/api/' + path, { headers: { 'x-telegram-init-data': signed(user) } });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const ids = (tasks) => tasks.map(({ id }) => id);
+  const session = await get('session');
+  assert.equal(session.currentDay, '2026-11-22');
+  assert.equal(session.partnerId, 22);
+  assert.deepEqual(ids((await get('tasks?scope=2026-11-22&view=day&assignee=me')).tasks), [today.id]);
+  const filteredDay = await get('tasks?scope=2026-11-22&view=day&assignee=partner&include=catalog&categoryId=' + bills.id);
+  assert.deepEqual(ids(filteredDay.tasks), [partner.id]);
+  assert.deepEqual(ids(filteredDay.carryover), [late.id]);
+  assert.equal(filteredDay.dayFinished, true);
+  assert.deepEqual(ids((await get('tasks?scope=2026-11&view=month')).tasks), [month.id]);
+  assert.deepEqual(ids((await get('tasks?scope=2026&view=year')).tasks), [year.id]);
+  assert.deepEqual(ids((await get('tasks?scope=none&view=unscheduled')).tasks), [untimed.id]);
+  assert.deepEqual(ids((await get('tasks?view=major')).tasks), [big.id]);
+  const stats = await get('tasks?scope=2026&view=statistics&include=summary');
+  assert.equal(stats.stats.total, 5);
+  assert.equal(stats.monthStats['2026-11'].total, 4);
+  await receive(11, '/day');
+  assert.match(last('sendMessage').text, /Купить билеты/);
+  await receive(11, '/backlog');
+  assert.doesNotMatch(last('sendMessage').text, /Отпуск\n/);
 });
