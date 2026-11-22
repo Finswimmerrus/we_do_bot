@@ -6,6 +6,7 @@ const ui = {
   view: 'backlog', panel: 'list', listRequest: 0, cardRequest: 0,
   filterStatus: { backlog: 'active', periods: 'all' },
   task: null, review: null, session: null,
+  catalog: { categories: [], tags: [] }, tagDraft: [], labelToDelete: null,
 };
 const statusNames = { active: 'Активна', done: 'Выполнена', obsolete: 'Неактуальна' };
 const statusActions = {
@@ -56,7 +57,7 @@ async function run(action, button) {
 
 function show(panel) {
   ui.panel = panel;
-  for (const name of ['list', 'task', 'review', 'settings']) $(`${name}-view`).hidden = name !== panel;
+  for (const name of ['list', 'task', 'review', 'settings', 'labels']) $(`${name}-view`).hidden = name !== panel;
 }
 
 function periodLabel(period) {
@@ -79,6 +80,17 @@ function fillSelect(select, values, emptyLabel) {
   const previous = select.value;
   select.replaceChildren(new Option(emptyLabel, ''), ...values.map((value) => new Option(value, value)));
   select.value = values.includes(previous) ? previous : '';
+}
+
+function labelChip(name, color) {
+  const chip = element('span', name, 'label-chip');
+  if (color) {
+    const dot = element('span', undefined, 'label-dot');
+    dot.style.backgroundColor = color;
+    dot.setAttribute('aria-hidden', 'true');
+    chip.prepend(dot);
+  }
+  return chip;
 }
 
 function showStats(stats) {
@@ -115,9 +127,16 @@ function taskRow(task) {
   open.type = 'button';
   const fields = [statusNames[task.status], periodLabel(task.period)];
   if (task.parentTitle) fields.push(`к «${task.parentTitle}»`);
-  if (task.category) fields.push(task.category);
-  fields.push(...task.tags);
   open.append(element('small', fields.join(' · ')));
+  const labels = task.tags.map((name) => ui.catalog.tags.find((label) => label.name === name) ?? { name });
+  if (task.category) {
+    labels.unshift(ui.catalog.categories.find((label) => label.name === task.category) ?? { name: task.category });
+  }
+  if (labels.length) {
+    const list = element('span', undefined, 'task-labels');
+    list.append(...labels.map(({ name, color }) => labelChip(name, color)));
+    open.append(list);
+  }
   open.addEventListener('click', () => run(() => openTask(task.id), open));
   const actions = element('div', undefined, 'task-status-actions');
   renderStatusActions(actions, task);
@@ -202,11 +221,14 @@ async function loadList() {
   $('task-list').setAttribute('aria-busy', 'true');
 
   try {
-    const { tasks, stats, monthStats, suggestions } = await api(`tasks?${params}`);
+    const { tasks, stats, monthStats, catalog, suggestions } = await api(`tasks?${params}`);
     if (seq !== ui.listRequest) return;
+    ui.catalog = catalog;
     fillSelect($('filter-category'), suggestions.categories, 'Все');
     fillSelect($('filter-tag'), suggestions.tags, 'Все');
-    $('category-suggestions').replaceChildren(...suggestions.categories.map((name) => element('option', name)));
+    if ($('filter-category').value !== params.get('category') || $('filter-tag').value !== params.get('tag')) {
+      return await loadList();
+    }
     if (periods) showStats(stats);
     showYear(monthStats);
     $('task-list').replaceChildren(...tasks.map(taskRow));
@@ -238,18 +260,76 @@ function showChildren(children) {
   $('child-list').replaceChildren(...children.map(taskRow));
 }
 
+function toggleCategoryInput() {
+  const input = $('new-category');
+  const adding = $('edit-category').value === 'new';
+  $('new-category-field').hidden = !adding;
+  input.disabled = !adding;
+  if (adding) input.focus();
+}
+
+function renderTagDraft() {
+  const select = $('edit-tag');
+  const adding = !$('new-tag-field').hidden;
+  const selected = new Set(ui.tagDraft.map(({ id }) => id));
+  select.replaceChildren(new Option('Добавить тег', ''),
+    ...ui.catalog.tags.filter(({ id }) => !selected.has(id)).map(({ id, name }) => new Option(name, id)),
+    new Option('Новый тег…', 'new'));
+  if (adding) select.value = 'new';
+
+  $('selected-tags').replaceChildren(...ui.tagDraft.map((tag) => {
+    const group = element('span', undefined, 'selected-tag');
+    const remove = element('button', '×');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `Убрать тег «${tag.name}» из задачи`);
+    remove.addEventListener('click', () => {
+      ui.tagDraft = ui.tagDraft.filter((item) => item !== tag);
+      renderTagDraft();
+      select.focus();
+    });
+    group.append(labelChip(tag.name, tag.color), remove);
+    return group;
+  }));
+}
+
+function addDraftTag() {
+  const input = $('new-tag');
+  const name = input.value.trim().replace(/\s+/g, ' ');
+  if (!name) return;
+  const key = name.normalize('NFKC').toLowerCase();
+  const sameName = (tag) => tag.name.normalize('NFKC').toLowerCase() === key;
+  if (!ui.tagDraft.some(sameName)) ui.tagDraft.push(ui.catalog.tags.find(sameName) ?? { name });
+  input.value = '';
+  $('new-tag-field').hidden = true;
+  renderTagDraft();
+}
+
+function setTaskLabels(task) {
+  $('edit-category').replaceChildren(new Option('Без категории', ''),
+    ...ui.catalog.categories.map(({ id, name }) => new Option(name, id)),
+    new Option('Новая категория…', 'new'));
+  const category = ui.catalog.categories.find(({ name }) => name === task.category);
+  $('edit-category').value = category ? category.id : '';
+  $('new-category').value = '';
+  toggleCategoryInput();
+  ui.tagDraft = task.tags.map((name) => ui.catalog.tags.find((tag) => tag.name === name) ?? { name });
+  $('new-tag-field').hidden = true;
+  $('new-tag').value = '';
+  renderTagDraft();
+}
+
 async function openTask(id) {
   const request = ++ui.cardRequest;
-  const [{ task, children }, { tasks }] = await Promise.all([api(`tasks/${id}`), api('tasks')]);
+  const [{ task, children, catalog }, { tasks }] = await Promise.all([api(`tasks/${id}`), api('tasks')]);
   if (request !== ui.cardRequest) return;
   ui.task = task;
+  ui.catalog = catalog;
   $('task-heading').textContent = task.title;
   $('task-details').textContent = task.parentTitle ? `Подзадача к «${task.parentTitle}»` : '';
   showTaskStatus(task);
   $('edit-title').value = task.title;
   $('edit-period').value = task.period || '';
-  $('edit-category').value = task.category || '';
-  $('edit-tags').value = task.tags.join(', ');
+  setTaskLabels(task);
   const parents = tasks.filter((item) => item.id !== task.id && item.parentId === null);
   $('edit-parent').replaceChildren(new Option('Без родителя', ''),
     ...parents.map((parent) => new Option(parent.title, parent.id)));
@@ -263,18 +343,20 @@ async function openTask(id) {
 
 async function updateTask() {
   const task = ui.task;
+  const category = $('edit-category').value;
+  if (!$('new-tag-field').hidden) addDraftTag();
   const patch = {
     version: task.version,
     title: $('edit-title').value,
     period: $('edit-period').value || null,
-    category: $('edit-category').value || null,
-    tags: $('edit-tags').value.split(',').map((tag) => tag.trim()).filter(Boolean),
+    categoryChoice: category === 'new' ? { name: $('new-category').value } : category ? { id: Number(category) } : null,
+    tagChoices: ui.tagDraft.map(({ id, name }) => id ? { id } : { name }),
   };
   if (!$('edit-parent').disabled) patch.parentId = Number($('edit-parent').value) || null;
   try {
     await api(`tasks/${task.id}`, patch, 'PATCH');
   } catch (error) {
-    if (error.status === 409) await openTask(task.id);
+    if (error.status === 409 || error.status === 404) await openTask(task.id);
     throw error;
   }
   await openTask(task.id);
@@ -344,6 +426,60 @@ async function openSettings() {
   show('settings');
 }
 
+function labelManagerRow(label) {
+  const row = element('li', undefined, 'label-row');
+  const actions = element('div', undefined, 'label-row-actions');
+  const colorField = element('label', 'Цвет', 'label-color-field');
+  const color = element('input');
+  color.type = 'color';
+  color.value = label.color || '#6c776e';
+  color.setAttribute('aria-label', `Цвет «${label.name}»`);
+  color.addEventListener('change', () => run(async () => {
+    try {
+      await api(`labels/${label.id}`, { color: color.value }, 'PATCH');
+    } catch (error) {
+      color.value = label.color || '#6c776e';
+      throw error;
+    }
+    await renderLabels();
+    notify('Цвет сохранён.');
+  }));
+  colorField.append(color);
+  actions.append(colorField);
+  if (label.color) {
+    const reset = element('button', 'Сбросить цвет', 'quiet');
+    reset.type = 'button';
+    reset.addEventListener('click', () => run(async () => {
+      await api(`labels/${label.id}`, { color: null }, 'PATCH');
+      await renderLabels();
+      notify('Цвет сброшен.');
+    }, reset));
+    actions.append(reset);
+  }
+  const remove = element('button', 'Удалить', 'danger');
+  remove.type = 'button';
+  remove.setAttribute('aria-label', `Удалить «${label.name}»`);
+  remove.addEventListener('click', () => {
+    const dialog = $('delete-label-dialog');
+    ui.labelToDelete = label;
+    $('delete-label-note').textContent = `«${label.name}» исчезнет из списка и всех задач пары. Сами задачи сохранятся.`;
+    dialog.returnValue = '';
+    dialog.showModal();
+  });
+  actions.append(remove);
+  row.append(labelChip(label.name, label.color), actions);
+  return row;
+}
+
+async function renderLabels() {
+  const { catalog } = await api('labels');
+  ui.catalog = catalog;
+  for (const kind of ['categories', 'tags']) {
+    $(`${kind}-empty`).hidden = catalog[kind].length > 0;
+    $(`${kind}-list`).replaceChildren(...catalog[kind].map(labelManagerRow));
+  }
+}
+
 function bindUi() {
   for (const tab of document.querySelectorAll('[data-view]')) {
     tab.addEventListener('click', () => run(() => changeView(tab.dataset.view), tab));
@@ -374,6 +510,25 @@ function bindUi() {
     event.preventDefault();
     run(updateTask, event.submitter);
   });
+  $('edit-category').addEventListener('change', toggleCategoryInput);
+  $('edit-tag').addEventListener('change', () => {
+    const value = $('edit-tag').value;
+    $('new-tag-field').hidden = value !== 'new';
+    if (value === 'new') {
+      $('new-tag').focus();
+    } else if (value) {
+      const label = ui.catalog.tags.find(({ id }) => id === Number(value));
+      if (label) ui.tagDraft.push(label);
+      renderTagDraft();
+    }
+  });
+  $('add-tag').addEventListener('click', addDraftTag);
+  $('new-tag').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    addDraftTag();
+    $('edit-tag').focus();
+  });
   $('add-child').addEventListener('submit', (event) => {
     event.preventDefault();
     run(async () => {
@@ -403,6 +558,32 @@ function bindUi() {
   $('review-clear').addEventListener('click', () => run(() => reviewAction({ period: null }), $('review-clear')));
   $('settings').addEventListener('click', () => run(openSettings, $('settings')));
   $('settings-back').addEventListener('click', () => run(() => changeView(ui.view)));
+  $('open-labels').addEventListener('click', () => run(async () => {
+    await renderLabels();
+    show('labels');
+  }, $('open-labels')));
+  $('labels-back').addEventListener('click', () => run(openSettings, $('labels-back')));
+  for (const kind of ['category', 'tag']) {
+    $(`add-${kind}-label`).addEventListener('submit', (event) => {
+      event.preventDefault();
+      run(async () => {
+        const input = $(`${kind}-label-name`);
+        await api('labels', { kind, name: input.value }, 'POST');
+        input.value = '';
+        await renderLabels();
+      }, event.submitter);
+    });
+  }
+  $('delete-label-dialog').addEventListener('close', (event) => {
+    const label = ui.labelToDelete;
+    ui.labelToDelete = null;
+    if (event.currentTarget.returnValue !== 'delete' || !label) return;
+    run(async () => {
+      await api(`labels/${label.id}`, undefined, 'DELETE');
+      await renderLabels();
+      notify('Удалено из списка и задач пары.');
+    });
+  });
   $('invite-link').addEventListener('click', (event) => {
     if (tg.openTelegramLink) {
       event.preventDefault();
@@ -415,6 +596,7 @@ function bindUi() {
   }, $('copy-invite')));
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && ui.panel === 'list') run(loadList);
+    if (!document.hidden && ui.panel === 'labels') run(renderLabels);
   });
 }
 

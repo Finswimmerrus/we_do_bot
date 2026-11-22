@@ -40,6 +40,27 @@ function cleanTags(value) {
   })).values()].filter(Boolean);
 }
 
+const labelLimits = { category: 60, tag: 40 };
+
+function labelKey(name) {
+  return name.normalize('NFKC').toLowerCase();
+}
+
+function labelName(kind, value) {
+  if (typeof kind !== 'string' || !Object.hasOwn(labelLimits, kind)) throw new InputError('Выберите категорию или тег.');
+  const name = cleanText(value, labelLimits[kind], kind === 'category' ? 'Название категории' : 'Название тега');
+  if (!name) throw new InputError('Введите название.');
+  return name;
+}
+
+function labelColor(value) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !/^#[a-fA-F\d]{6}$/.test(value)) {
+    throw new InputError('Выберите цвет.');
+  }
+  return value.toLowerCase();
+}
+
 function isId(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
@@ -100,7 +121,17 @@ export class Store {
         UNIQUE (chat_id, message_id)
       ) STRICT;
       CREATE INDEX IF NOT EXISTS pending_voice_jobs ON voice_jobs(id) WHERE file_id IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS labels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        space_id INTEGER NOT NULL REFERENCES spaces(id),
+        kind TEXT NOT NULL CHECK (kind IN ('category', 'tag')),
+        name TEXT NOT NULL,
+        name_key TEXT NOT NULL,
+        color TEXT,
+        UNIQUE (space_id, kind, name_key)
+      ) STRICT;
     `);
+    this.#migrateLabels();
   }
 
   close() {
@@ -166,6 +197,89 @@ export class Store {
   migrateGroup(from, to) {
     this.db.prepare('UPDATE spaces SET group_chat = ? WHERE group_chat = ? AND NOT EXISTS (SELECT 1 FROM spaces WHERE group_chat = ?)')
       .run(to, from, to);
+  }
+
+  #migrateLabels() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 1) return;
+    this.transaction(() => {
+      if (this.db.prepare('PRAGMA user_version').get().user_version >= 1) return;
+      const tasks = this.db.prepare("SELECT id, space_id AS space, category, tags FROM tasks WHERE category IS NOT NULL OR tags != '[]' ORDER BY id").all();
+      const update = this.db.prepare('UPDATE tasks SET category = ?, tags = ?, version = version + 1 WHERE id = ?');
+      for (const task of tasks) {
+        const category = task.category ? this.#registerLabel(task.space, 'category', task.category).name : null;
+        const tags = JSON.stringify(this.#namesForTags(task.space, cleanTags(JSON.parse(task.tags))));
+        if (category !== task.category || tags !== task.tags) update.run(category, tags, task.id);
+      }
+      this.db.exec('PRAGMA user_version = 1');
+    });
+  }
+
+  #registerLabel(space, kind, value) {
+    const name = labelName(kind, value);
+    const key = labelKey(name);
+    this.db.prepare('INSERT INTO labels (space_id, kind, name, name_key) VALUES (?, ?, ?, ?) ON CONFLICT (space_id, kind, name_key) DO NOTHING')
+      .run(space, kind, name, key);
+    return this.db.prepare('SELECT id, kind, name, color FROM labels WHERE space_id = ? AND kind = ? AND name_key = ?')
+      .get(space, kind, key);
+  }
+
+  #labelById(space, id) {
+    if (!isId(id)) throw new InputError('Некорректный номер категории или тега.');
+    const label = this.db.prepare('SELECT id, kind, name, color FROM labels WHERE space_id = ? AND id = ?').get(space, id);
+    if (!label) throw new InputError('Категория или тег уже удалены либо недоступны.', 404);
+    return label;
+  }
+
+  #chosenLabel(space, kind, choice) {
+    if (!choice || Array.isArray(choice) || typeof choice !== 'object') throw new InputError('Выберите значение из списка.');
+    if (!('id' in choice)) return this.#registerLabel(space, kind, choice.name).name;
+    const label = this.#labelById(space, choice.id);
+    if (label.kind !== kind) throw new InputError('Выберите значение из нужного списка.');
+    return label.name;
+  }
+
+  #namesForTags(space, names) {
+    return [...new Set(names.map((name) => this.#registerLabel(space, 'tag', name).name))];
+  }
+
+  catalog(space) {
+    const labels = this.db.prepare('SELECT id, kind, name, color FROM labels WHERE space_id = ?').all(space)
+      .sort((first, second) => first.name.localeCompare(second.name, 'ru'));
+    return {
+      categories: labels.filter(({ kind }) => kind === 'category'),
+      tags: labels.filter(({ kind }) => kind === 'tag'),
+    };
+  }
+
+  createLabel(space, { kind, name }) {
+    return this.transaction(() => this.#registerLabel(space, kind, name));
+  }
+
+  setLabelColor(space, id, color) {
+    return this.transaction(() => {
+      this.#labelById(space, id);
+      this.db.prepare('UPDATE labels SET color = ? WHERE space_id = ? AND id = ?').run(labelColor(color), space, id);
+      return this.#labelById(space, id);
+    });
+  }
+
+  deleteLabel(space, id) {
+    return this.transaction(() => {
+      const { kind, name } = this.#labelById(space, id);
+      if (kind === 'category') {
+        this.db.prepare('UPDATE tasks SET category = NULL, version = version + 1 WHERE space_id = ? AND category = ?')
+          .run(space, name);
+      } else {
+        const tasks = this.db.prepare('SELECT id, tags FROM tasks WHERE space_id = ? AND EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE value = ?)')
+          .all(space, name);
+        const update = this.db.prepare('UPDATE tasks SET tags = ?, version = version + 1 WHERE space_id = ? AND id = ?');
+        for (const task of tasks) {
+          const remaining = JSON.parse(task.tags).filter((tag) => tag !== name);
+          update.run(JSON.stringify(remaining), space, task.id);
+        }
+      }
+      this.db.prepare('DELETE FROM labels WHERE space_id = ? AND id = ?').run(space, id);
+    });
   }
 
   task(space, id) {
@@ -249,10 +363,20 @@ export class Store {
         }
       }
       if ('period' in patch) task.period = patch.period === null ? null : exactPeriod(patch.period);
-      if ('category' in patch) {
-        task.category = patch.category === null ? null : cleanText(patch.category, 60, 'Категория') || null;
+      if ('categoryChoice' in patch) {
+        task.category = patch.categoryChoice === null ? null : this.#chosenLabel(space, 'category', patch.categoryChoice);
+      } else if ('category' in patch) {
+        const name = patch.category === null ? '' : cleanText(patch.category, 60, 'Категория');
+        task.category = name ? this.#registerLabel(space, 'category', name).name : null;
       }
-      if ('tags' in patch) task.tags = cleanTags(patch.tags);
+      if ('tagChoices' in patch) {
+        if (!Array.isArray(patch.tagChoices) || patch.tagChoices.length > 20) {
+          throw new InputError('Добавьте до 20 тегов.');
+        }
+        task.tags = [...new Set(patch.tagChoices.map((choice) => this.#chosenLabel(space, 'tag', choice)))];
+      } else if ('tags' in patch) {
+        task.tags = this.#namesForTags(space, cleanTags(patch.tags));
+      }
       if ('parentId' in patch && patch.parentId !== task.parentId) {
         if (patch.parentId !== null) {
           if (patch.parentId === id) throw new InputError('Задача не может быть своим родителем.');
@@ -289,7 +413,7 @@ export class Store {
     const rows = this.db.prepare(`${taskFields} WHERE ${filters.join(' AND ')} ORDER BY t.id DESC`).all(...args);
     return rows.map(asTask).filter((task) =>
       (!term || task.title.toLowerCase().includes(term)) &&
-      (!category || task.category?.toLowerCase() === category.toLowerCase()) &&
-      (!tag || task.tags.some((name) => name.toLowerCase() === tag.toLowerCase())));
+      (!category || task.category && labelKey(task.category) === labelKey(category)) &&
+      (!tag || task.tags.some((name) => labelKey(name) === labelKey(tag))));
   }
 }

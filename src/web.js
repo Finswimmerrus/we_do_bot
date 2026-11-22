@@ -93,15 +93,33 @@ export function webServer({ store, token, username, timeZone }) {
           linkCommand: `/link@${username}`,
         });
       }
+      if (pathname === '/api/labels') {
+        if (request.method === 'GET') return sendJson(response, 200, { catalog: store.catalog(space.id) });
+        if (request.method === 'POST') {
+          return sendJson(response, 201, { label: store.createLabel(space.id, await bodyOf(request)) });
+        }
+      }
+      const labelRoute = pathname.match(/^\/api\/labels\/(\d+)$/);
+      if (labelRoute) {
+        const id = Number(labelRoute[1]);
+        if (request.method === 'PATCH') {
+          const { color } = await bodyOf(request);
+          return sendJson(response, 200, { label: store.setLabelColor(space.id, id, color) });
+        }
+        if (request.method === 'DELETE') {
+          store.deleteLabel(space.id, id);
+          return sendJson(response, 200, { ok: true });
+        }
+      }
       if (pathname === '/api/tasks' && request.method === 'GET') {
         const tasks = store.list(space.id, queryOptions(url));
         if (searchParams.get('include') !== 'summary') return sendJson(response, 200, { tasks });
         const scope = searchParams.get('scope') ?? 'all';
         const periodTasks = store.list(space.id, { scope });
-        const allTasks = scope === 'all' ? periodTasks : store.list(space.id);
+        const catalog = store.catalog(space.id);
         const suggestions = {
-          categories: [...new Set(allTasks.map((task) => task.category).filter(Boolean))].sort(),
-          tags: [...new Set(allTasks.flatMap((task) => task.tags))].sort(),
+          categories: catalog.categories.map(({ name }) => name),
+          tags: catalog.tags.map(({ name }) => name),
         };
         const monthStats = scope.length === 4
           ? Object.fromEntries(Array.from({ length: 12 }, (_, index) => {
@@ -109,7 +127,7 @@ export function webServer({ store, token, username, timeZone }) {
             return [period, taskStats(periodTasks.filter((task) => task.period === period))];
           }))
           : null;
-        return sendJson(response, 200, { tasks, stats: taskStats(periodTasks), monthStats, suggestions });
+        return sendJson(response, 200, { tasks, stats: taskStats(periodTasks), monthStats, catalog, suggestions });
       }
       if (pathname === '/api/tasks' && request.method === 'POST') {
         return sendJson(response, 201, { task: store.createTask(space.id, user, await bodyOf(request)) });
@@ -118,7 +136,11 @@ export function webServer({ store, token, username, timeZone }) {
       if (taskRoute) {
         const id = Number(taskRoute[1]);
         if (request.method === 'GET') {
-          return sendJson(response, 200, { task: store.task(space.id, id), children: store.children(space.id, id) });
+          return sendJson(response, 200, {
+            task: store.task(space.id, id),
+            children: store.children(space.id, id),
+            catalog: store.catalog(space.id),
+          });
         }
         if (request.method === 'PATCH') {
           return sendJson(response, 200, { task: store.updateTask(space.id, id, await bodyOf(request)) });

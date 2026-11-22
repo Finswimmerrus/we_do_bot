@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { Bot } from '../src/bot.js';
 import { currentPeriod, parseMonth } from '../src/periods.js';
@@ -129,6 +132,41 @@ test('разбор сохраняет точные периоды и откло�
   assert.match(last('sendMessage').text, /Купить два билета/);
 });
 
+test('каталог переносит старые категории и теги и сохраняет его после перезапуска', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'we-do-labels-'));
+  const path = join(directory, 'tasks.sqlite');
+  const previous = new Store(path);
+  const { id: space } = previous.joinOrCreate(11);
+  const first = previous.createTask(space, 11, { title: 'Первая' });
+  const second = previous.createTask(space, 11, { title: 'Вторая' });
+  const seed = previous.db.prepare('UPDATE tasks SET category = ?, tags = ? WHERE id = ?');
+  seed.run('Мелкие', '["Дом"]', first.id);
+  seed.run('мелкие', '["дом", "Покупки"]', second.id);
+  previous.db.exec('PRAGMA user_version = 0');
+  previous.close();
+
+  const store = new Store(path);
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true });
+  });
+  const { categories, tags } = store.catalog(space);
+  assert.deepEqual(categories.map(({ name }) => name), ['Мелкие']);
+  assert.deepEqual(tags.map(({ name }) => name), ['Дом', 'Покупки']);
+  assert.deepEqual(store.task(space, second.id).tags, ['Дом', 'Покупки']);
+  assert.equal(store.task(space, second.id).category, 'Мелкие');
+  assert.equal(store.task(space, second.id).version, second.version + 1);
+  store.deleteLabel(space, tags[0].id);
+  assert.deepEqual(store.task(space, second.id).tags, ['Покупки']);
+  const reopened = new Store(path);
+  try {
+    assert.deepEqual(reopened.catalog(space).tags.map(({ name }) => name), ['Покупки']);
+    assert.equal(reopened.task(space, first.id).title, 'Первая');
+  } finally {
+    reopened.close();
+  }
+});
+
 test('Mini App видит изменения бота, хранит независимые подзадачи и ограничивает доступ', async (t) => {
   const { store, receive, last } = setup(t);
   await receive(11, '/start');
@@ -176,4 +214,24 @@ test('Mini App видит изменения бота, хранит незави
   assert.match(last('sendMessage').text, /Билеты · к «Поездка»/);
   await receive(11, '/month ноябрь');
   assert.match(last('sendMessage').text, /Выполнено 1/);
+
+  const { data: { catalog } } = await call('labels', { initData: signed(11) });
+  const [category] = catalog.categories;
+  const [tag] = catalog.tags;
+  assert.equal(category.name, 'Быт');
+  assert.equal(tag.name, 'дом');
+  assert.deepEqual((await call('labels', { initData: signed(33) })).data.catalog, { categories: [], tags: [] });
+  assert.equal((await call(`labels/${category.id}`, { initData: signed(33), method: 'DELETE' })).code, 404);
+  const currentParent = data.tasks.find((task) => task.id === parent.id);
+  assert.equal((await patch(currentParent, { categoryChoice: { id: category.id }, tagChoices: [{ id: tag.id }, { name: 'Для двоих' }] })).code, 200);
+  assert.equal((await call(`labels/${tag.id}`, { method: 'PATCH', body: { color: '#4287AF' } })).data.label.color, '#4287af');
+  const repeated = await call('labels', { method: 'POST', body: { kind: 'category', name: ' быт ' } });
+  assert.equal(repeated.data.label.id, category.id);
+  assert.equal((await call(`labels/${tag.id}`, { method: 'DELETE' })).code, 200);
+  assert.equal((await call(`labels/${category.id}`, { method: 'DELETE' })).code, 200);
+  const updated = (await call(`tasks/${parent.id}`)).data.task;
+  assert.equal(updated.category, null);
+  assert.equal(updated.status, 'done');
+  assert.deepEqual(updated.tags, ['Для двоих']);
+  assert.equal((await patch(updated, { categoryChoice: { id: category.id } })).code, 404);
 });

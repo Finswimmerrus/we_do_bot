@@ -36,6 +36,8 @@ button:disabled { cursor: wait; opacity: .65; }
 button.primary, .tabs button[aria-current="page"] { background: var(--accent); color: #fff; border-color: var(--accent); }
 button.quiet { background: transparent; border-color: transparent; color: var(--accent); }
 button.quiet:hover { border-color: var(--line); }
+button.danger { color: var(--warn); }
+button.danger:hover { border-color: var(--warn); }
 button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input, select {
   min-width: 0;
@@ -73,6 +75,15 @@ label input, label select { font-size: 1rem; }
 .task-row .task-open { border-color: transparent; background: transparent; }
 .task-row .task-open:hover { background: var(--accent-light); }
 .task-open small { color: var(--muted); display: block; font-weight: 400; margin-top: .2rem; }
+.task-labels, .selected-tags { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-top: .4rem; }
+.task-labels:empty, .selected-tags:empty { display: none; }
+.label-chip { display: inline-block; max-width: 100%; overflow-wrap: anywhere; padding: .2rem .5rem; border: 1px solid var(--line); border-radius: .8rem; color: var(--muted); font-size: .82rem; font-weight: 500; }
+.label-dot { display: inline-block; width: .62rem; height: .62rem; border: 1px solid #252d2633; border-radius: 50%; margin-right: .32rem; }
+.tag-input { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .4rem; }
+.tag-input input { flex: 1 1 9rem; }
+.selected-tag { display: inline-flex; align-items: center; max-width: 100%; }
+.selected-tag .label-chip { border-radius: .65rem 0 0 .65rem; }
+.selected-tag button { align-self: stretch; min-height: 2rem; padding: .1rem .45rem; border-left: 0; border-radius: 0 .65rem .65rem 0; }
 .task-status { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; margin-top: .8rem; }
 .status-label { color: var(--muted); border: 1px solid var(--line); border-radius: 1rem; padding: .3rem .55rem; font-size: .875rem; }
 .task-status-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
@@ -91,6 +102,14 @@ label input, label select { font-size: 1rem; }
 #subtasks { margin-top: 1.35rem; }
 #subtasks .task-list { margin-top: .6rem; }
 #settings-view .card button, #settings-view .card a { margin-top: .6rem; }
+.settings-action { margin-top: .8rem; }
+.label-list { list-style: none; margin: 0; padding: 0; }
+.label-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .45rem; padding: .5rem 0; border-top: 1px solid var(--line); }
+.label-row-actions, .label-color-field { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.label-row-actions button { font-size: .85rem; padding-inline: .5rem; }
+.label-color-field input { width: 2.6rem; padding: .28rem; cursor: pointer; }
+dialog { width: min(28rem, calc(100% - 2rem)); padding: 1.2rem; border: 1px solid var(--line); border-radius: .85rem; color: var(--ink); background: var(--surface); }
+dialog::backdrop { background: #252d2680; }
 @media (max-width: 480px) {
   .task-row { display: block; padding: .25rem .35rem .55rem; }
   .task-open { width: 100%; }

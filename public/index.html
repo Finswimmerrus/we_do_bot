@@ -66,9 +66,18 @@
         <form id="task-editor" class="card editor">
           <label class="wide">Название<input id="edit-title" maxlength="200" required></label>
           <label>Месяц<input id="edit-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
-          <label>Категория<input id="edit-category" list="category-suggestions" maxlength="60"></label>
-          <datalist id="category-suggestions"></datalist>
-          <label>Теги через запятую<input id="edit-tags" maxlength="820"></label>
+          <label>Категория<select id="edit-category"></select></label>
+          <label id="new-category-field" class="wide" hidden>Название новой категории
+            <input id="new-category" maxlength="60" required disabled>
+          </label>
+          <div class="wide">
+            <label>Теги<select id="edit-tag"></select></label>
+            <div id="new-tag-field" class="tag-input" hidden>
+              <input id="new-tag" maxlength="40" aria-label="Название нового тега" placeholder="Название тега">
+              <button id="add-tag" type="button">Добавить тег</button>
+            </div>
+            <div id="selected-tags" class="selected-tags" aria-label="Выбранные теги"></div>
+          </div>
           <label class="wide">Родитель<select id="edit-parent"></select></label>
           <div class="wide actions"><button class="primary" type="submit">Сохранить</button></div>
         </form>
@@ -105,6 +114,7 @@
       <section id="settings-view" hidden>
         <button id="settings-back" class="quiet back" type="button">‹ Назад</button>
         <h1>Пространство пары</h1>
+        <button id="open-labels" class="settings-action" type="button">Категории и теги ›</button>
         <div class="card">
           <h2>Партнёр</h2>
           <p id="partner-info"></p>
@@ -116,7 +126,39 @@
           <p id="group-info"></p>
         </div>
       </section>
+      <section id="labels-view" hidden>
+        <button id="labels-back" class="quiet back" type="button">‹ К пространству</button>
+        <h1>Категории и теги</h1>
+        <section class="card">
+          <h2>Категории</h2>
+          <form id="add-category-label" class="quick-add">
+            <input id="category-label-name" maxlength="60" placeholder="Новая категория" aria-label="Название категории" required>
+            <button type="submit">Добавить</button>
+          </form>
+          <p id="categories-empty" hidden>Категорий пока нет.</p>
+          <ul id="categories-list" class="label-list"></ul>
+        </section>
+        <section class="card">
+          <h2>Теги</h2>
+          <form id="add-tag-label" class="quick-add">
+            <input id="tag-label-name" maxlength="40" placeholder="Новый тег" aria-label="Название тега" required>
+            <button type="submit">Добавить</button>
+          </form>
+          <p id="tags-empty" hidden>Тегов пока нет.</p>
+          <ul id="tags-list" class="label-list"></ul>
+        </section>
+      </section>
     </div>
   </main>
+  <dialog id="delete-label-dialog" aria-labelledby="delete-label-title">
+    <form method="dialog">
+      <h2 id="delete-label-title">Удалить из пространства?</h2>
+      <p id="delete-label-note"></p>
+      <div class="actions">
+        <button value="back" autofocus>Назад</button>
+        <button class="danger" value="delete">Удалить</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>
