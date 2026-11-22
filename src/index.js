@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import { Bot, poll, registerCommands, TelegramApi } from './bot.js';
 import { currentPeriod } from './periods.js';
 import { Store } from './store.js';
+import { voiceTranscriber } from './voice.js';
 import { webServer } from './web.js';
 
 async function main() {
@@ -10,6 +11,7 @@ async function main() {
   const host = process.env.BIND_HOST || '127.0.0.1';
   const port = Number(process.env.PORT || 3000);
   const appUrl = process.env.MINI_APP_URL;
+  const voiceUrl = process.env.VOICE_TRANSCRIBER_URL;
   if (!token || !/^\d+:[\w-]+$/.test(token)) throw new Error('Проверьте BOT_TOKEN в настройках.');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT должен быть числом от 1 до 65535.');
   if (appUrl) {
@@ -21,6 +23,7 @@ async function main() {
   currentPeriod(timeZone);
 
   const api = new TelegramApi(token);
+  const transcribe = voiceUrl ? voiceTranscriber(voiceUrl) : null;
   const { username } = await api.call('getMe');
   if (!username) throw new Error('У бота отсутствует имя пользователя.');
   const webhook = await api.call('getWebhookInfo');
@@ -31,15 +34,24 @@ async function main() {
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  let voices;
   try {
     server.listen(port, host);
     await once(server, 'listening');
     await registerCommands(api);
     console.log(`@${username} запущен. Mini App слушает http://${host}:${port}`);
-    await poll(api, new Bot({ api, store, username, appUrl, timeZone }), controller.signal);
+    const bot = new Bot({ api, store, username, appUrl, timeZone, transcribe });
+    voices = bot.processVoices(controller.signal).catch((error) => {
+      controller.abort();
+      return error;
+    });
+    await poll(api, bot, controller.signal);
   } finally {
+    controller.abort();
+    const voiceError = await voices;
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     store.close();
+    if (voiceError) throw voiceError;
   }
 }
 

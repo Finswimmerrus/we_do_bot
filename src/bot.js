@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 import { currentPeriod, exactPeriod, InputError, labelPeriod, months, parseMonth, parseScope, parseYear, shiftMonth } from './periods.js';
 import { statuses, taskStats } from './store.js';
+import { maxVoiceBytes, maxVoiceSeconds, tasksFromSpeech } from './voice.js';
 
 const pageSize = 6;
 const reviewLifetime = 30 * 60 * 1000;
@@ -47,6 +48,28 @@ export class TelegramApi {
     }
     return result.result;
   }
+
+  async downloadVoice(fileId, signal) {
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+    const file = await this.call('getFile', { file_id: fileId }, deadline);
+    const parts = file.file_path?.split('/');
+    if (!parts?.length || parts.some((part) => !/^[\w.-]+$/.test(part) || part === '.' || part === '..')) {
+      throw new Error('Telegram не вернул путь к голосовому сообщению.');
+    }
+    if (file.file_size > maxVoiceBytes) throw new InputError('Запись слишком большая. Отправьте её двумя частями.');
+    const response = await this.request('https://api.telegram.org/file/bot' + this.token + '/' + parts.join('/'), {
+      signal: deadline, redirect: 'error',
+    });
+    if (!response.ok || !response.body) throw new Error('Не удалось скачать голосовое сообщение.');
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > maxVoiceBytes) throw new InputError('Запись слишком большая. Отправьте её двумя частями.');
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks, size);
+  }
 }
 
 function button(text, callback) {
@@ -80,8 +103,8 @@ function readCommand(message, username) {
 }
 
 export class Bot {
-  constructor({ api, store, username, appUrl, timeZone, now = () => new Date() }) {
-    Object.assign(this, { api, store, username, appUrl, timeZone, now });
+  constructor({ api, store, username, appUrl, timeZone, transcribe, now = () => new Date() }) {
+    Object.assign(this, { api, store, username, appUrl, timeZone, transcribe, now });
     this.pending = new Map();
     this.reviews = new Map();
   }
@@ -155,6 +178,16 @@ export class Bot {
       }
       return;
     }
+    if (message.voice && ctx.private && this.transcribe) {
+      try {
+        this.requireAccess(ctx);
+        this.queueVoice(ctx);
+      } catch (error) {
+        if (!(error instanceof InputError)) throw error;
+        await this.send(message, error.message);
+      }
+      return;
+    }
     if (typeof message.text !== 'string') return;
 
     const command = readCommand(message, this.username);
@@ -174,6 +207,50 @@ export class Bot {
       if (!(error instanceof InputError)) throw error;
       await this.send(message, error.message);
     }
+  }
+
+  queueVoice(ctx) {
+    const { voice, message_id: messageId, chat } = ctx.message;
+    if (voice.duration > maxVoiceSeconds) {
+      throw new InputError('Отправьте голосовое длительностью до 90 секунд.');
+    }
+    if (voice.file_size > maxVoiceBytes) {
+      throw new InputError('Запись слишком большая. Отправьте её двумя частями.');
+    }
+    this.store.queueVoice(ctx.space.id, ctx.user, chat.id, messageId, voice.file_id);
+  }
+
+  async processVoices(signal) {
+    if (!this.transcribe) return;
+    while (!signal.aborted) {
+      const job = this.store.pendingVoice();
+      if (job) await this.processVoice(job, signal);
+      else await setTimeout(400, undefined, { signal }).catch((error) => {
+        if (error.name !== 'AbortError') throw error;
+      });
+    }
+  }
+
+  async processVoice(job, signal) {
+    let titles = [];
+    let reply;
+    try {
+      const audio = await this.api.downloadVoice(job.fileId, signal);
+      titles = tasksFromSpeech(await this.transcribe(audio, signal));
+      reply = 'Добавлено в бэклог:\n' + titles.map((title) => '• ' + title).join('\n');
+    } catch (error) {
+      if (signal.aborted) return;
+      if (!(error instanceof InputError)) console.error('Не удалось распознать голосовое сообщение.');
+      reply = error instanceof InputError ? error.message : 'Не получилось распознать голосовое. Попробуйте отправить его ещё раз.';
+    }
+    if (signal.aborted) return;
+    this.store.completeVoice(job, titles);
+    await this.api.call('sendMessage', {
+      chat_id: job.chat, text: reply,
+      reply_parameters: { message_id: job.message, allow_sending_without_reply: true },
+    }, AbortSignal.any([signal, AbortSignal.timeout(10_000)])).catch(() => {
+      if (!signal.aborted) console.error('Не удалось отправить результат распознавания.');
+    });
   }
 
   requireAccess(ctx) {

@@ -90,6 +90,16 @@ export class Store {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS tasks_by_period ON tasks(space_id, period, status);
       CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks(space_id, parent_id);
+      CREATE TABLE IF NOT EXISTS voice_jobs (
+        id INTEGER PRIMARY KEY,
+        space_id INTEGER NOT NULL REFERENCES spaces(id),
+        user_id INTEGER NOT NULL REFERENCES members(user_id),
+        chat_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        file_id TEXT,
+        UNIQUE (chat_id, message_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS pending_voice_jobs ON voice_jobs(id) WHERE file_id IS NOT NULL;
     `);
   }
 
@@ -170,6 +180,12 @@ export class Store {
       .all(space, id).map(asTask);
   }
 
+  #insertTask(space, user, title, parentId, source) {
+    const { lastInsertRowid } = this.db.prepare('INSERT INTO tasks (space_id, title, parent_id, created_by, created_at, source) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(space, title, parentId, user, new Date().toISOString(), source);
+    return Number(lastInsertRowid);
+  }
+
   createTask(space, user, { title, parentId = null }, source = null) {
     const name = taskTitle(title);
     return this.transaction(() => {
@@ -180,10 +196,36 @@ export class Store {
       if (parentId !== null && this.task(space, parentId).parentId !== null) {
         throw new InputError('Подзадачу можно добавить только к задаче верхнего уровня.');
       }
-      const { lastInsertRowid } = this.db.prepare(`
-        INSERT INTO tasks (space_id, title, parent_id, created_by, created_at, source) VALUES (?, ?, ?, ?, ?, ?)
-      `).run(space, name, parentId, user, new Date().toISOString(), source);
-      return this.task(space, Number(lastInsertRowid));
+      return this.task(space, this.#insertTask(space, user, name, parentId, source));
+    });
+  }
+
+  queueVoice(space, user, chat, message, fileId) {
+    return this.transaction(() => {
+      if (this.db.prepare('SELECT id FROM voice_jobs WHERE chat_id = ? AND message_id = ?').get(chat, message)) return;
+      const { total, byUser } = this.db.prepare('SELECT COUNT(*) AS total, COUNT(CASE WHEN user_id = ? THEN 1 END) AS byUser FROM voice_jobs WHERE file_id IS NOT NULL')
+        .get(user);
+      if (total >= 8 || byUser >= 2) {
+        throw new InputError('Сейчас распознаю другие записи. Отправьте голосовое чуть позже.');
+      }
+      this.db.prepare('INSERT INTO voice_jobs (space_id, user_id, chat_id, message_id, file_id) VALUES (?, ?, ?, ?, ?)')
+        .run(space, user, chat, message, fileId);
+    });
+  }
+
+  pendingVoice() {
+    return this.db.prepare('SELECT id, space_id AS space, user_id AS user, chat_id AS chat, message_id AS message, file_id AS fileId FROM voice_jobs WHERE file_id IS NOT NULL ORDER BY id LIMIT 1')
+      .get();
+  }
+
+  completeVoice(job, titles) {
+    this.transaction(() => {
+      const result = this.db.prepare('UPDATE voice_jobs SET file_id = NULL WHERE id = ? AND file_id IS NOT NULL').run(job.id);
+      if (!result.changes) return;
+      for (const [index, title] of [...titles.entries()].reverse()) {
+        const source = ['voice', job.chat, job.message, index].join(':');
+        this.#insertTask(job.space, job.user, taskTitle(title), null, source);
+      }
     });
   }
 
