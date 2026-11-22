@@ -10,7 +10,7 @@ const ui = {
 const statusNames = { active: 'Активна', done: 'Выполнена', obsolete: 'Неактуальна' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
-  done: { label: 'Выполнить', notice: 'Задача выполнена.' },
+  done: { label: 'Завершить', notice: 'Задача завершена.' },
   obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Её можно найти в списке «Неактуальные».' },
 };
 

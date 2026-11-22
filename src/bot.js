@@ -9,7 +9,7 @@ const reviewLifetime = 30 * 60 * 1000;
 const symbols = { active: '○', done: '✓', obsolete: '–' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
-  done: { label: 'Выполнить', notice: 'Задача выполнена.' },
+  done: { label: 'Завершить', notice: 'Задача завершена.' },
   obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Она в списке «Неактуальные».' },
 };
 const commands = {
@@ -261,7 +261,7 @@ export class Bot {
       button(tasks.length === 1 ? 'Открыть задачу' : brief(task, 45), `t:${context}:${task.id}`),
     ]);
     if (tasks.length === 1) rows.unshift(taskActionButtons(tasks[0], context));
-    if (tasks.length > 1) reply += '\n\nЧтобы выполнить или отменить задачу, нажмите на её название.';
+    if (tasks.length > 1) reply += '\n\nЧтобы завершить или отменить задачу, нажмите на её название.';
     await this.api.call('sendMessage', {
       chat_id: job.chat, text: reply,
       reply_markup: rows.length ? markup(rows) : undefined,
@@ -360,7 +360,7 @@ export class Bot {
     lines.push(visible.length ? visible.map((task) => `${symbols[task.status]} ${brief(task)}`).join('\n') : 'В этом списке пока нет задач.');
     if (endPage) lines.push(`Страница ${current + 1} из ${endPage + 1}`);
     if (visible.some((task) => task.status === 'active')) {
-      lines.push('Нажмите на название задачи, чтобы выполнить или отменить её.');
+      lines.push('Нажмите на название задачи, чтобы завершить или отменить её.');
     }
     const rows = visible.map((task) =>
       [button(`${symbols[task.status]} ${brief(task, 45)}`, `t:${scope}:${status}:${current}:${task.id}`)]);
