@@ -134,6 +134,49 @@ test('разбор сохраняет точные периоды и откло�
   assert.match(last('sendMessage').text, /Купить два билета/);
 });
 
+test('удаление подзадачи не передаёт её номер новой задаче и не оживляет старые кнопки', async (t) => {
+  const { store, receive, click, last } = setup(t);
+  await receive(11, '/start');
+  const { id: space } = store.spaceFor(11);
+  const parent = store.createTask(space, 11, { title: 'Ремонт' });
+  const old = store.createTask(space, 11, { title: 'Купить краску', parentId: parent.id });
+  await receive(11, '/backlog');
+  const open = last('sendMessage').reply_markup.inline_keyboard.flat().find(({ text }) => text.startsWith(old.title));
+  await click(11, open.callback_data);
+  const complete = last('editMessageText').reply_markup.inline_keyboard[0][0].callback_data;
+  store.deleteSubtask(space, old.id, old.version);
+  const replacement = store.createTask(space, 11, { title: 'Другая задача' });
+  assert.ok(replacement.id > old.id);
+
+  await click(11, complete);
+  assert.match(last('answerCallbackQuery').text, /Задача не найдена/);
+  await click(11, `s:all:active:0:${replacement.id}:${replacement.version}:obsolete`);
+  assert.match(last('answerCallbackQuery').text, /кнопка устарела/);
+  assert.equal(store.task(space, replacement.id).status, 'active');
+});
+
+test('разбор пропускает удалённую подзадачу, сохраняя следующую без изменений', async (t) => {
+  const { store, receive, click, last } = setup(t);
+  await receive(11, '/start');
+  const { id: space } = store.spaceFor(11);
+  const next = store.createTask(space, 11, { title: 'Следующая задача', period: '2026-11' });
+  for (const action of ['Оставить', '✓', 'Перенести']) {
+    const current = store.createTask(space, 11, { title: 'Удаляемая подзадача', parentId: next.id, period: next.period });
+    await receive(11, '/review');
+    assert.match(last('sendMessage').text, /Удаляемая подзадача/);
+    let choice = last('sendMessage').reply_markup.inline_keyboard.flat().find(({ text }) => text === action);
+    if (action === 'Перенести') {
+      await click(11, choice.callback_data);
+      choice = last('editMessageText').reply_markup.inline_keyboard.flat().find(({ text }) => text === 'Перенести');
+    }
+    store.deleteSubtask(space, current.id, current.version);
+    await click(11, choice.callback_data);
+    assert.match(last('editMessageText').text, /Следующая задача/);
+    assert.match(last('answerCallbackQuery').text, /Список обновлён/);
+    assert.deepEqual(store.task(space, next.id), next);
+  }
+});
+
 test('повторное приглашение переносит чужое одиночное пространство только после подтверждения', async (t) => {
   const { store, receive, click, last } = setup(t);
   await receive(11, '/start');
@@ -291,6 +334,44 @@ test('переход со схемы 2 сохраняет собственный
   store.updateTask(space, parent.id, { version: parent.version, category: 'Другое', period: '2026-12' });
   assert.equal(store.task(space, child.id).category, 'Отдых');
   assert.equal(store.task(space, child.id).period, '2026-10');
+});
+
+test('перенос базы со схемы 3 сохраняет связи и запоминает удалённый максимум после перезапуска', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'we-do-task-ids-'));
+  const path = join(directory, 'tasks.sqlite');
+  let store = new Store(path);
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true });
+  });
+  const { id: space } = store.joinOrCreate(11);
+  const parent = store.createTask(space, 11, { title: 'Родитель', category: 'Поездки' }, 'source-parent');
+  const child = store.createTask(space, 11, { title: 'Подзадача', parentId: parent.id, period: '2026-11' });
+  const { sql } = store.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'tasks'").get();
+  const legacy = sql.replace('CREATE TABLE tasks', 'CREATE TABLE legacy_tasks')
+    .replace('PRIMARY KEY AUTOINCREMENT', 'PRIMARY KEY')
+    .replace('REFERENCES tasks(', 'REFERENCES legacy_tasks(');
+  store.db.exec(`
+    PRAGMA foreign_keys = OFF;
+    ${legacy};
+    INSERT INTO legacy_tasks SELECT * FROM tasks;
+    DROP TABLE tasks;
+    ALTER TABLE legacy_tasks RENAME TO tasks;
+    PRAGMA user_version = 3;
+  `);
+  store.close();
+
+  store = new Store(path);
+  assert.deepEqual(store.task(space, parent.id), parent);
+  assert.deepEqual(store.children(space, parent.id), [child]);
+  assert.equal(store.createTask(space, 11, { title: 'Повтор запроса' }, 'source-parent').id, parent.id);
+  assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), []);
+  store.deleteSubtask(space, child.id, child.version);
+  store.close();
+
+  store = new Store(path);
+  const replacement = store.createTask(space, 11, { title: 'Новая задача' });
+  assert.ok(replacement.id > child.id);
 });
 
 test('Mini App копирует категорию при создании и сохраняет свой период подзадачи', async (t) => {

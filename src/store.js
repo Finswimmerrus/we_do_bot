@@ -24,6 +24,28 @@ const taskFields = `
   FROM tasks AS t LEFT JOIN tasks AS p ON p.id = t.parent_id
 `;
 
+function taskTable(name) {
+  return `CREATE TABLE IF NOT EXISTS ${name} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    space_id INTEGER NOT NULL REFERENCES spaces(id),
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'done', 'obsolete')),
+    period TEXT,
+    category TEXT,
+    tags TEXT NOT NULL DEFAULT '[]',
+    parent_id INTEGER,
+    created_by INTEGER NOT NULL REFERENCES members(user_id),
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    source TEXT,
+    importance TEXT NOT NULL DEFAULT 'low' CHECK (importance IN ('low', 'medium', 'high', 'global')),
+    UNIQUE (space_id, source),
+    UNIQUE (space_id, id),
+    FOREIGN KEY (space_id, parent_id) REFERENCES ${name}(space_id, id)
+  ) STRICT;`;
+}
+
 function asTask(row) {
   return { ...row, tags: JSON.parse(row.tags) };
 }
@@ -102,26 +124,7 @@ export class Store {
         slot INTEGER NOT NULL CHECK (slot IN (1, 2)),
         UNIQUE (space_id, slot)
       ) STRICT;
-      CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY,
-        space_id INTEGER NOT NULL REFERENCES spaces(id),
-        title TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'done', 'obsolete')),
-        period TEXT,
-        category TEXT,
-        tags TEXT NOT NULL DEFAULT '[]',
-        parent_id INTEGER,
-        created_by INTEGER NOT NULL REFERENCES members(user_id),
-        created_at TEXT NOT NULL,
-        completed_at TEXT,
-        version INTEGER NOT NULL DEFAULT 1,
-        source TEXT,
-        UNIQUE (space_id, source),
-        UNIQUE (space_id, id),
-        FOREIGN KEY (space_id, parent_id) REFERENCES tasks(space_id, id)
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS tasks_by_period ON tasks(space_id, period, status);
-      CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks(space_id, parent_id);
+      ${taskTable('tasks')}
       CREATE TABLE IF NOT EXISTS voice_jobs (
         id INTEGER PRIMARY KEY,
         space_id INTEGER NOT NULL REFERENCES spaces(id),
@@ -162,6 +165,10 @@ export class Store {
       ) STRICT;
     `);
     this.#migrateSchema();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS tasks_by_period ON tasks(space_id, period, status);
+      CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks(space_id, parent_id);
+    `);
   }
 
   close() {
@@ -322,27 +329,48 @@ export class Store {
   }
 
   #migrateSchema() {
-    if (this.db.prepare('PRAGMA user_version').get().user_version >= 3) return;
-    this.transaction(() => {
-      const version = this.db.prepare('PRAGMA user_version').get().user_version;
-      if (version >= 3) return;
-      if (version < 2) {
-        this.db.exec(`
-          ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
-            CHECK (importance IN ('low', 'medium', 'high', 'global'));
-          ALTER TABLE labels ADD COLUMN icon TEXT;
-        `);
-        if (version < 1) this.#migrateLabels();
-      } else {
-        this.db.exec(`
-          UPDATE tasks AS child
-          SET category = COALESCE(child.category, (SELECT parent.category FROM tasks AS parent WHERE parent.id = child.parent_id)),
-            version = version + 1
-          WHERE child.parent_id IS NOT NULL;
-        `);
-      }
-      this.db.exec('PRAGMA user_version = 3');
-    });
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 4) return;
+    const { sql } = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").get();
+    const rebuildTasks = !/\bAUTOINCREMENT\b/i.test(sql);
+    if (rebuildTasks) this.db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      this.transaction(() => {
+        const version = this.db.prepare('PRAGMA user_version').get().user_version;
+        if (version >= 4) return;
+        if (version < 2) {
+          if (!this.db.prepare('PRAGMA table_info(tasks)').all().some(({ name }) => name === 'importance')) {
+            this.db.exec(`ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
+              CHECK (importance IN ('low', 'medium', 'high', 'global'))`);
+          }
+          this.db.exec('ALTER TABLE labels ADD COLUMN icon TEXT');
+          if (version < 1) this.#migrateLabels();
+        } else if (version === 2) {
+          this.db.exec(`
+            UPDATE tasks AS child
+            SET category = COALESCE(child.category, (SELECT parent.category FROM tasks AS parent WHERE parent.id = child.parent_id)),
+              version = version + 1
+            WHERE child.parent_id IS NOT NULL;
+          `);
+        }
+        if (rebuildTasks) this.#migrateTaskIds();
+        this.db.exec('PRAGMA user_version = 4');
+      });
+    } finally {
+      if (rebuildTasks) this.db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  #migrateTaskIds() {
+    const columns = 'id, space_id, title, status, period, category, tags, parent_id, created_by, created_at, completed_at, version, source, importance';
+    this.db.exec(`
+      ${taskTable('new_tasks')}
+      INSERT INTO new_tasks (${columns}) SELECT ${columns} FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE new_tasks RENAME TO tasks;
+    `);
+    if (this.db.prepare('PRAGMA foreign_key_check').get()) {
+      throw new Error('Не удалось перенести задачи: нарушены связи в базе.');
+    }
   }
 
   #migrateLabels() {
@@ -442,11 +470,16 @@ export class Store {
     });
   }
 
-  task(space, id) {
+  findTask(space, id) {
     if (!isId(id)) throw new InputError('Некорректный номер задачи.');
     const row = this.db.prepare(`${taskFields} WHERE t.space_id = ? AND t.id = ?`).get(space, id);
-    if (!row) throw new InputError('Задача не найдена.', 404);
-    return asTask(row);
+    return row ? asTask(row) : null;
+  }
+
+  task(space, id) {
+    const task = this.findTask(space, id);
+    if (!task) throw new InputError('Задача не найдена.', 404);
+    return task;
   }
 
   children(space, id) {

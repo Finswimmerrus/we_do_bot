@@ -449,9 +449,13 @@ async function reviewAction(change) {
       try {
         if (!await patchWithCompletionWarning(review.task, change)) return;
       } catch (error) {
-        if (error.status === 409) {
+        if (error.status === 404 || error.status === 409) {
           const { tasks } = await current();
           if (ui.review === review) renderReview(tasks);
+        }
+        if (error.status === 404) {
+          if (ui.review === review && ui.panel === 'review') notify('Задача уже удалена. Список разбора обновлён.');
+          return;
         }
         throw error;
       }

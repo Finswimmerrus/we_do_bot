@@ -86,7 +86,7 @@ function button(text, callback) {
 function taskActionButtons(task, context) {
   return Object.entries(statusActions)
     .filter(([status]) => status !== task.status)
-    .map(([status, { label }]) => button(label, `s:${context}:${task.id}:${task.version}:${status}`));
+    .map(([status, { label }]) => button(label, `s2:${context}:${task.id}:${task.version}:${status}`));
 }
 
 function markup(rows) {
@@ -275,7 +275,7 @@ export class Bot {
     const tasks = this.store.completeVoice(job, titles);
     const context = 'all:active:0';
     const rows = tasks.map((task) => [
-      button(tasks.length === 1 ? 'Открыть задачу' : brief(task, 45), `t:${context}:${task.id}`),
+      button(tasks.length === 1 ? 'Открыть задачу' : brief(task, 45), `t2:${context}:${task.id}`),
     ]);
     if (tasks.length === 1) rows.unshift(taskActionButtons(tasks[0], context));
     if (tasks.length > 1) reply += '\n\nЧтобы завершить или отменить задачу, нажмите на её название.';
@@ -377,7 +377,7 @@ export class Bot {
     });
     return this.send(ctx.message, `Добавлено: ${task.title}`, markup([
       taskActionButtons(task, 'all:active:0'),
-      [button('Открыть задачу', `t:all:active:0:${task.id}`), button('Бэклог', 'l:all:active:0')],
+      [button('Открыть задачу', `t2:all:active:0:${task.id}`), button('Бэклог', 'l:all:active:0')],
     ]));
   }
 
@@ -404,7 +404,7 @@ export class Bot {
       lines.push('Нажмите на название задачи, чтобы завершить или отменить её.');
     }
     const rows = visible.map((task) =>
-      [button(brief(task, 45), `t:${scope}:${status}:${current}:${task.id}`)]);
+      [button(brief(task, 45), `t2:${scope}:${status}:${current}:${task.id}`)]);
     rows.push([
       ...(current > 0 ? [button('‹ Назад', `l:${scope}:${status}:${current - 1}`)] : []),
       ...(current < endPage ? [button('Дальше ›', `l:${scope}:${status}:${current + 1}`)] : []),
@@ -464,7 +464,7 @@ export class Bot {
     }
     return this.show(ctx, lines.join('\n'), [
       taskActionButtons(task, context),
-      children.total ? [button('Подзадачи', `k:${context}:${task.id}`)] : [],
+      children.total ? [button('Подзадачи', `k2:${context}:${task.id}`)] : [],
       this.appButton(ctx.message),
       [button('‹ К списку', `l:${context}`)],
     ], task.status === 'done' ? [strike(task.title)] : []);
@@ -474,9 +474,9 @@ export class Bot {
     const parent = this.store.task(ctx.space.id, id);
     const children = this.store.children(ctx.space.id, id);
     return this.show(ctx, `Подзадачи · ${parent.title}`, [
-      ...children.slice(0, 40).map((child) => [button(brief(child, 45), `t:${context}:${child.id}`)]),
+      ...children.slice(0, 40).map((child) => [button(brief(child, 45), `t2:${context}:${child.id}`)]),
       this.appButton(ctx.message),
-      [button('‹ К родительской задаче', `t:${context}:${parent.id}`)],
+      [button('‹ К родительской задаче', `t2:${context}:${parent.id}`)],
     ]);
   }
 
@@ -493,8 +493,8 @@ export class Bot {
 
   reviewTask(review) {
     while (review.ids.length) {
-      const task = this.store.task(review.space, review.ids[0]);
-      if (matches(task, review.scope)) return task;
+      const task = this.store.findTask(review.space, review.ids[0]);
+      if (task && matches(task, review.scope)) return task;
       review.ids.shift();
     }
     return null;
@@ -545,26 +545,30 @@ export class Bot {
     }
     if (action === 'pick') return void await this.showReview(ctx, key, exactPeriod(target));
     if (action === 'back') return void await this.showReview(ctx, key);
-    if (action === 'move') {
-      const period = target === 'none' ? null : exactPeriod(target);
-      if (period === task.period) throw new InputError('Выберите другой месяц или оставьте задачу.');
-      this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, { version: task.version, period }));
-    } else if (action === 'done' || action === 'obsolete') {
-      try {
+    try {
+      if (action === 'move') {
+        const period = target === 'none' ? null : exactPeriod(target);
+        if (period === task.period) throw new InputError('Выберите другой месяц или оставьте задачу.');
+        this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, { version: task.version, period }));
+      } else if (action === 'done' || action === 'obsolete') {
         this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, {
           version: task.version, status: action, confirmWithActiveSubtasks: target === 'yes',
         }));
-      } catch (error) {
-        if (!error.activeSubtasks) throw error;
-        const prefix = `a:${key}:${task.id}:${version}`;
-        await this.show(ctx, `${task.title}\n\n${activeSubtaskWarning(error.activeSubtasks)}`, [
-          [button('Завершить всё равно', `${prefix}:done:yes`)],
-          [button('К подзадачам', `k:all:active:0:${task.id}`), button('‹ К разбору', `${prefix}:back`)],
-        ]);
-        return;
+      } else if (action !== 'skip') {
+        throw new InputError('Действие недоступно.');
       }
-    } else if (action !== 'skip') {
-      throw new InputError('Действие недоступно.');
+    } catch (error) {
+      if (error.status === 404) {
+        await this.showReview(ctx, key);
+        return 'Задача уже удалена. Список обновлён.';
+      }
+      if (!error.activeSubtasks) throw error;
+      const prefix = `a:${key}:${task.id}:${version}`;
+      await this.show(ctx, `${task.title}\n\n${activeSubtaskWarning(error.activeSubtasks)}`, [
+        [button('Завершить всё равно', `${prefix}:done:yes`)],
+        [button('К подзадачам', `k2:all:active:0:${task.id}`), button('‹ К разбору', `${prefix}:back`)],
+      ]);
+      return;
     }
     review.ids.shift();
     await this.showReview(ctx, key);
@@ -594,9 +598,13 @@ export class Bot {
       case 'y': await this.showYear(ctx, scope); return;
       case 'r': await this.startReview(ctx, scope); return;
       case 'a': return this.reviewAction(ctx, parts);
-      case 't': await this.showTask(ctx, this.store.task(ctx.space.id, Number(id)), scope, status, page); return;
-      case 'k': await this.showChildren(ctx, Number(id), `${scope}:${status}:${page}`); return;
-      case 's': {
+      case 't':
+      case 'k':
+      case 's':
+        throw new InputError('Эта кнопка устарела. Откройте список заново командой /backlog.');
+      case 't2': await this.showTask(ctx, this.store.task(ctx.space.id, Number(id)), scope, status, page); return;
+      case 'k2': await this.showChildren(ctx, Number(id), `${scope}:${status}:${page}`); return;
+      case 's2': {
         let task;
         try {
           task = this.applyAction(ctx, () => this.store.updateTask(ctx.space.id, Number(id), {
@@ -607,8 +615,8 @@ export class Bot {
             const context = `${scope}:${status}:${page}`;
             const parent = this.store.task(ctx.space.id, Number(id));
             await this.show(ctx, `${parent.title}\n\n${activeSubtaskWarning(error.activeSubtasks)}`, [
-              [button('Завершить всё равно', `s:${context}:${id}:${version}:done:yes`)],
-              [button('К подзадачам', `k:${context}:${id}`), button('‹ Назад', `t:${context}:${id}`)],
+              [button('Завершить всё равно', `s2:${context}:${id}:${version}:done:yes`)],
+              [button('К подзадачам', `k2:${context}:${id}`), button('‹ Назад', `t2:${context}:${id}`)],
             ]);
             return;
           }
