@@ -98,10 +98,12 @@ test('личный и связанный общий чаты использую�
   await click(11, complete);
   assert.equal(store.list(initial.id, { status: 'done' }).length, 1);
   assert.ok(store.list(initial.id, { status: 'done' })[0].completedAt);
+  const completed = last('editMessageText');
+  assert.deepEqual(completed.entities, [{ type: 'strikethrough', offset: 0, length: 'Ответ на приглашение'.length }]);
 
   await receive(11, '/task Уточнить время встречи');
   const newTask = last('sendMessage').reply_markup.inline_keyboard[0];
-  assert.deepEqual(newTask.map(({ text }) => text), ['Завершить', 'Отменить задачу']);
+  assert.deepEqual(newTask.map(({ text }) => text), ['✓', '🗑']);
   await click(11, newTask[1].callback_data);
   assert.equal(store.list(initial.id, { status: 'obsolete' })[0].title, 'Уточнить время встречи');
   const restore = last('editMessageText').reply_markup.inline_keyboard[0][0];
@@ -142,7 +144,7 @@ test('каталог переносит старые категории и те�
   const seed = previous.db.prepare('UPDATE tasks SET category = ?, tags = ? WHERE id = ?');
   seed.run('Мелкие', '["Дом"]', first.id);
   seed.run('мелкие', '["дом", "Покупки"]', second.id);
-  previous.db.exec('PRAGMA user_version = 0');
+  previous.db.exec('ALTER TABLE tasks DROP COLUMN importance; ALTER TABLE labels DROP COLUMN icon; PRAGMA user_version = 0');
   previous.close();
 
   const store = new Store(path);
@@ -167,7 +169,7 @@ test('каталог переносит старые категории и те�
   }
 });
 
-test('Mini App видит изменения бота, хранит независимые подзадачи и ограничивает доступ', async (t) => {
+test('Mini App видит изменения бота, наследует период и категорию и ограничивает доступ', async (t) => {
   const { store, receive, last } = setup(t);
   await receive(11, '/start');
   await receive(22, `/start ${store.spaceFor(11).invite}`);
@@ -200,20 +202,34 @@ test('Mini App видит изменения бота, хранит незави
   assert.equal((await call(`tasks/${parent.id}`, { method: 'PATCH', body: { version: parent.version, parentId: child.id } })).code, 400);
 
   const patch = (task, data) => call(`tasks/${task.id}`, { method: 'PATCH', body: { version: task.version, ...data } });
-  assert.equal((await patch(child, { period: '2026-10', tags: ['Дом', 'дом'], category: 'Быт' })).code, 200);
-  assert.equal((await patch(parent, { period: '2026-11', status: 'done' })).code, 200);
+  assert.equal((await patch(child, { period: '2026-10', category: 'Быт' })).code, 400);
+  const { data: { task: plannedParent } } = await patch(parent, { period: '2026-10', category: 'Быт', importance: 'global' });
+  const { data: { task: plannedChild } } = await call(`tasks/${child.id}`);
+  assert.equal(plannedChild.period, '2026-10');
+  assert.equal(plannedChild.category, 'Быт');
+  assert.equal(plannedChild.importance, 'low');
+  assert.equal((await patch(child, { status: 'done' })).code, 409);
+  assert.equal((await patch(plannedChild, { importance: 'global' })).code, 400);
+  assert.equal((await patch(plannedChild, { tags: ['Дом', 'дом'], importance: 'high' })).code, 200);
+  assert.equal((await patch(plannedParent, { period: '2026-11', status: 'done' })).code, 200);
   assert.equal((await patch(parent, { status: 'obsolete' })).code, 409);
   const { data } = await call('tasks?scope=2026&include=summary');
-  assert.equal(data.monthStats['2026-10'].active, 1);
+  assert.equal(data.monthStats['2026-10'].active, 0);
+  assert.equal(data.monthStats['2026-11'].active, 1);
   assert.equal(data.monthStats['2026-11'].done, 1);
   assert.deepEqual(data.tasks.find((task) => task.id === child.id).tags, ['дом']);
   assert.equal(data.stats.percent, 50);
   assert.equal(taskStats([{ status: 'obsolete' }]).percent, null);
+  const { data: { tasks: filtered } } = await call('tasks?scope=2026-11&importance=high&include=catalog');
+  assert.deepEqual(filtered.map(({ id }) => id), [child.id]);
 
-  await receive(11, '/backlog октябрь');
+  await receive(11, '/backlog ноябрь');
   assert.match(last('sendMessage').text, /Билеты · к «Поездка»/);
   await receive(11, '/month ноябрь');
-  assert.match(last('sendMessage').text, /Выполнено 1/);
+  const monthReport = last('sendMessage');
+  assert.match(monthReport.text, /Выполнено 1/);
+  const [completedTitle] = monthReport.entities;
+  assert.equal(monthReport.text.slice(completedTitle.offset, completedTitle.offset + completedTitle.length), 'Поездка');
 
   const { data: { catalog } } = await call('labels', { initData: signed(11) });
   const [category] = catalog.categories;
@@ -222,6 +238,9 @@ test('Mini App видит изменения бота, хранит незави
   assert.equal(tag.name, 'дом');
   assert.deepEqual((await call('labels', { initData: signed(33) })).data.catalog, { categories: [], tags: [] });
   assert.equal((await call(`labels/${category.id}`, { initData: signed(33), method: 'DELETE' })).code, 404);
+  const { data: { label: updatedCategory } } = await call(`labels/${category.id}`, { method: 'PATCH', body: { icon: 'home', color: '#aa4400' } });
+  assert.equal(updatedCategory.icon, 'home');
+  assert.equal(updatedCategory.color, '#aa4400');
   const currentParent = data.tasks.find((task) => task.id === parent.id);
   assert.equal((await patch(currentParent, { categoryChoice: { id: category.id }, tagChoices: [{ id: tag.id }, { name: 'Для двоих' }] })).code, 200);
   assert.equal((await call(`labels/${tag.id}`, { method: 'PATCH', body: { color: '#4287AF' } })).data.label.color, '#4287af');
@@ -234,4 +253,8 @@ test('Mini App видит изменения бота, хранит незави
   assert.equal(updated.status, 'done');
   assert.deepEqual(updated.tags, ['Для двоих']);
   assert.equal((await patch(updated, { categoryChoice: { id: category.id } })).code, 404);
+  const standalone = store.createTask(store.spaceFor(11).id, 11, { title: 'Большая задача' });
+  const { data: { task: globalTask } } = await patch(standalone, { importance: 'global' });
+  assert.equal(globalTask.importance, 'global');
+  assert.equal((await patch(globalTask, { parentId: parent.id })).code, 400);
 });

@@ -20,6 +20,7 @@
       <nav aria-label="Разделы" class="tabs">
         <button type="button" data-view="backlog">Бэклог</button>
         <button type="button" data-view="periods">Периоды</button>
+        <button type="button" data-view="statistics">Статистика</button>
       </nav>
       <section id="list-view">
         <div class="heading">
@@ -43,12 +44,18 @@
           <label id="scope-year-label" hidden>Год
             <input id="scope-year" type="number" min="1000" max="9999">
           </label>
-          <label>Статус
+          <label data-task-filter>Статус
             <select id="filter-status"><option value="active">Активные</option><option value="done">Выполненные</option><option value="obsolete">Неактуальные</option><option value="all">Все статусы</option></select>
           </label>
-          <label>Поиск<input id="filter-query" type="search" placeholder="Название"></label>
-          <label>Категория<select id="filter-category"><option value="">Все</option></select></label>
-          <label>Тег<select id="filter-tag"><option value="">Все</option></select></label>
+          <label data-task-filter>Поиск<input id="filter-query" type="search" placeholder="Название"></label>
+          <label data-task-filter>Категория<select id="filter-category"><option value="">Все</option></select></label>
+          <label data-task-filter>Важность
+            <select id="filter-importance">
+              <option value="">Любая</option><option value="low">Низкая</option>
+              <option value="medium">Средняя</option><option value="high">Важная</option>
+              <option value="global">Глобальная</option>
+            </select>
+          </label>
         </div>
         <div id="stats" class="stats" hidden></div>
         <div id="year-grid" class="year-grid" hidden></div>
@@ -60,7 +67,8 @@
         <h1 id="task-heading">Задача</h1>
         <p id="task-details"></p>
         <div class="task-status">
-          <span id="task-status-label" class="status-label"></span>
+          <span id="task-priority"></span>
+          <span id="task-status-label" class="status-label" hidden></span>
           <div id="task-status-actions" class="task-status-actions"></div>
         </div>
         <form id="task-editor" class="card editor">
@@ -70,14 +78,14 @@
           <label id="new-category-field" class="wide" hidden>Название новой категории
             <input id="new-category" maxlength="60" required disabled>
           </label>
-          <div class="wide">
-            <label>Теги<select id="edit-tag"></select></label>
-            <div id="new-tag-field" class="tag-input" hidden>
-              <input id="new-tag" maxlength="40" aria-label="Название нового тега" placeholder="Название тега">
-              <button id="add-tag" type="button">Добавить тег</button>
-            </div>
-            <div id="selected-tags" class="selected-tags" aria-label="Выбранные теги"></div>
-          </div>
+          <p id="inherited-fields" class="wide field-note" hidden>Период и категория берутся из родительской задачи.</p>
+          <label>Важность
+            <select id="edit-importance" required>
+              <option value="" disabled>Выберите важность</option>
+              <option value="low">Низкая</option><option value="medium">Средняя</option>
+              <option value="high">Важная</option><option value="global">Глобальная</option>
+            </select>
+          </label>
           <label class="wide">Родитель<select id="edit-parent"></select></label>
           <div class="wide actions"><button class="primary" type="submit">Сохранить</button></div>
         </form>
@@ -92,7 +100,7 @@
         </div>
       </section>
       <section id="review-view" hidden>
-        <button id="review-back" class="quiet back" type="button">‹ К периоду</button>
+        <button id="review-back" class="quiet back" type="button">‹ К статистике</button>
         <h1 id="review-heading">Разбор</h1>
         <p id="review-progress"></p>
         <div id="review-card" class="card" hidden>
@@ -100,8 +108,12 @@
           <p id="review-task-info"></p>
           <div class="actions">
             <button data-review="move" type="button">Перенести</button>
-            <button data-review="obsolete" type="button">Отменить задачу</button>
-            <button class="primary" data-review="done" type="button">Завершить</button>
+            <button class="icon-button" data-review="done" type="button" aria-label="Завершить" title="Завершить">
+              <span class="action-icon icon-check" aria-hidden="true"></span>
+            </button>
+            <button class="icon-button" data-review="obsolete" type="button" aria-label="Отменить задачу" title="Отменить задачу">
+              <span class="action-icon icon-trash" aria-hidden="true"><i></i></span>
+            </button>
             <button class="quiet" data-review="skip" type="button">Оставить</button>
           </div>
           <form id="review-move" class="quick-add" hidden>
@@ -114,7 +126,7 @@
       <section id="settings-view" hidden>
         <button id="settings-back" class="quiet back" type="button">‹ Назад</button>
         <h1>Пространство пары</h1>
-        <button id="open-labels" class="settings-action" type="button">Категории и теги ›</button>
+        <button id="open-labels" class="settings-action" type="button">Категории ›</button>
         <div class="card">
           <h2>Партнёр</h2>
           <p id="partner-info"></p>
@@ -128,9 +140,8 @@
       </section>
       <section id="labels-view" hidden>
         <button id="labels-back" class="quiet back" type="button">‹ К пространству</button>
-        <h1>Категории и теги</h1>
+        <h1>Категории</h1>
         <section class="card">
-          <h2>Категории</h2>
           <form id="add-category-label" class="quick-add">
             <input id="category-label-name" maxlength="60" placeholder="Новая категория" aria-label="Название категории" required>
             <button type="submit">Добавить</button>
@@ -138,27 +149,23 @@
           <p id="categories-empty" hidden>Категорий пока нет.</p>
           <ul id="categories-list" class="label-list"></ul>
         </section>
-        <section class="card">
-          <h2>Теги</h2>
-          <form id="add-tag-label" class="quick-add">
-            <input id="tag-label-name" maxlength="40" placeholder="Новый тег" aria-label="Название тега" required>
-            <button type="submit">Добавить</button>
-          </form>
-          <p id="tags-empty" hidden>Тегов пока нет.</p>
-          <ul id="tags-list" class="label-list"></ul>
-        </section>
       </section>
     </div>
   </main>
   <dialog id="delete-label-dialog" aria-labelledby="delete-label-title">
     <form method="dialog">
-      <h2 id="delete-label-title">Удалить из пространства?</h2>
+      <h2 id="delete-label-title">Удалить категорию?</h2>
       <p id="delete-label-note"></p>
       <div class="actions">
         <button value="back" autofocus>Назад</button>
         <button class="danger" value="delete">Удалить</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="category-icon-dialog" aria-labelledby="category-icon-title">
+    <h2 id="category-icon-title">Иконка категории</h2>
+    <div id="category-icon-options" class="category-icon-grid"></div>
+    <form method="dialog"><button class="quiet" type="submit">Закрыть</button></form>
   </dialog>
 </body>
 </html>

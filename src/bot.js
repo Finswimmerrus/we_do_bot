@@ -1,16 +1,16 @@
 import { randomBytes } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 import { currentPeriod, exactPeriod, InputError, labelPeriod, months, parseMonth, parseScope, parseYear, shiftMonth } from './periods.js';
-import { statuses, taskStats } from './store.js';
+import { categoryIcons, importanceLevels, taskStats } from './store.js';
 import { maxVoiceBytes, maxVoiceSeconds, tasksFromSpeech } from './voice.js';
 
 const pageSize = 6;
 const reviewLifetime = 30 * 60 * 1000;
-const symbols = { active: '○', done: '✓', obsolete: '–' };
+const importanceSymbols = { low: '◻️', medium: '🟡', high: '🔴', global: '🔵' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
-  done: { label: 'Завершить', notice: 'Задача завершена.' },
-  obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Она в списке «Неактуальные».' },
+  done: { label: '✓', notice: 'Задача завершена.' },
+  obsolete: { label: '🗑', notice: 'Задача отменена. Она в списке «Неактуальные».' },
 };
 const commands = {
   start: 'Открыть пространство пары',
@@ -101,6 +101,10 @@ function statsLine(stats) {
   return `Всего ${stats.total} · Выполнено ${stats.done} · Активно ${stats.active} · Неактуально ${stats.obsolete}\nДоля выполненных ${rate}`;
 }
 
+function strike(text, offset = 0) {
+  return { type: 'strikethrough', offset, length: text.length };
+}
+
 function matches(task, scope) {
   return task.status === 'active' && Boolean(task.period?.startsWith(scope));
 }
@@ -124,20 +128,21 @@ export class Bot {
     return currentPeriod(this.timeZone, this.now());
   }
 
-  send(message, text, replyMarkup) {
-    const request = { chat_id: message.chat.id, text, reply_markup: replyMarkup };
+  send(message, text, replyMarkup, entities) {
+    const request = { chat_id: message.chat.id, text, reply_markup: replyMarkup, entities };
     if (message.message_thread_id) request.message_thread_id = message.message_thread_id;
     return this.api.call('sendMessage', request);
   }
 
-  async show(ctx, text, rows = []) {
-    if (!ctx.callback) return this.send(ctx.message, text, markup(rows));
+  async show(ctx, text, rows = [], entities = []) {
+    if (!ctx.callback) return this.send(ctx.message, text, markup(rows), entities);
     try {
       await this.api.call('editMessageText', {
         chat_id: ctx.message.chat.id,
         message_id: ctx.message.message_id,
         text,
         reply_markup: markup(rows),
+        entities,
       });
     } catch (error) {
       if (!error.message.includes('message is not modified')) throw error;
@@ -357,13 +362,22 @@ export class Bot {
     const visible = list.slice(current * pageSize, (current + 1) * pageSize);
     const lines = [scope === 'all' ? 'Бэклог' : labelPeriod(scope === 'none' ? null : scope)];
     if (scope.length === 7) lines.push(statsLine(taskStats(this.store.list(ctx.space.id, { scope }))));
-    lines.push(visible.length ? visible.map((task) => `${symbols[task.status]} ${brief(task)}`).join('\n') : 'В этом списке пока нет задач.');
+    const entities = [];
+    let offset = lines.join('\n\n').length + 2;
+    const taskLines = visible.map((task) => {
+      const title = brief(task);
+      if (task.status === 'done') entities.push(strike(title, offset));
+      const line = task.status === 'obsolete' ? `Отменена · ${title}` : title;
+      offset += line.length + 1;
+      return line;
+    });
+    lines.push(taskLines.join('\n') || 'В этом списке пока нет задач.');
     if (endPage) lines.push(`Страница ${current + 1} из ${endPage + 1}`);
     if (visible.some((task) => task.status === 'active')) {
       lines.push('Нажмите на название задачи, чтобы завершить или отменить её.');
     }
     const rows = visible.map((task) =>
-      [button(`${symbols[task.status]} ${brief(task, 45)}`, `t:${scope}:${status}:${current}:${task.id}`)]);
+      [button(brief(task, 45), `t:${scope}:${status}:${current}:${task.id}`)]);
     rows.push([
       ...(current > 0 ? [button('‹ Назад', `l:${scope}:${status}:${current - 1}`)] : []),
       ...(current < endPage ? [button('Дальше ›', `l:${scope}:${status}:${current + 1}`)] : []),
@@ -383,7 +397,7 @@ export class Bot {
       button('Без месяца', `l:none:${status}:0`),
       button('Текущий месяц', `l:${this.period}:${status}:0`),
     ], this.appButton(ctx.message));
-    return this.show(ctx, lines.join('\n\n'), rows);
+    return this.show(ctx, lines.join('\n\n'), rows, entities);
   }
 
   async showYear(ctx, year) {
@@ -408,7 +422,8 @@ export class Bot {
   async showTask(ctx, task, scope, status, page) {
     const children = taskStats(this.store.children(ctx.space.id, task.id));
     const context = `${scope}:${status}:${page}`;
-    const lines = [task.title, `${statuses[task.status]} · ${labelPeriod(task.period)}`];
+    const lines = [task.title, labelPeriod(task.period), `${importanceSymbols[task.importance]} ${importanceLevels[task.importance]}`];
+    if (task.status === 'obsolete') lines.push('Отменена');
     if (task.parentTitle) lines.push(`Подзадача к «${task.parentTitle}»`);
     if (children.total) {
       if (children.done + children.active) {
@@ -416,13 +431,15 @@ export class Bot {
       }
       if (children.obsolete) lines.push(`Неактуальных подзадач: ${children.obsolete}`);
     }
-    if (task.category) lines.push(task.category);
-    if (task.tags.length) lines.push(task.tags.join(', '));
+    if (task.category) {
+      const category = this.store.catalog(ctx.space.id).categories.find(({ name }) => name === task.category);
+      lines.push(`${categoryIcons[category?.icon || 'folder'][0]} ${task.category}`);
+    }
     return this.show(ctx, lines.join('\n'), [
       taskActionButtons(task, context),
       this.appButton(ctx.message),
       [button('‹ К списку', `l:${context}`)],
-    ]);
+    ], task.status === 'done' ? [strike(task.title)] : []);
   }
 
   startReview(ctx, scope) {
@@ -470,9 +487,9 @@ export class Bot {
       ]);
     }
     return this.show(ctx, text, [
-      [button('Перенести', `${prefix}:pick:${shiftMonth(task.period, 1) ?? task.period}`),
-        button(statusActions.obsolete.label, `${prefix}:obsolete`)],
-      [button(statusActions.done.label, `${prefix}:done`), button('Оставить', `${prefix}:skip`)],
+      task.parentId === null ? [button('Перенести', `${prefix}:pick:${shiftMonth(task.period, 1) ?? task.period}`)] : [],
+      [button(statusActions.done.label, `${prefix}:done`), button(statusActions.obsolete.label, `${prefix}:obsolete`),
+        button('Оставить', `${prefix}:skip`)],
     ]);
   }
 
@@ -486,6 +503,9 @@ export class Bot {
     if (task?.id !== Number(id) || task.version !== Number(version)) {
       await this.showReview(ctx, key);
       return 'Список обновлён.';
+    }
+    if (task.parentId !== null && (action === 'pick' || action === 'move')) {
+      throw new InputError('Период подзадачи меняется вместе с родительской задачей.');
     }
     if (action === 'pick') return void await this.showReview(ctx, key, exactPeriod(target));
     if (action === 'back') return void await this.showReview(ctx, key);

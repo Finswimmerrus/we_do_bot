@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { currentPeriod, InputError } from './periods.js';
-import { taskStats } from './store.js';
+import { categoryIcons, taskStats } from './store.js';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -59,8 +59,8 @@ async function bodyOf(request) {
 
 function queryOptions(url) {
   const options = Object.fromEntries(url.searchParams);
-  const { scope, status, query, category, tag } = options;
-  return { scope, status, query, category, tag };
+  const { scope, status, query, category, tag, importance } = options;
+  return { scope, status, query, category, tag, importance };
 }
 
 export function webServer({ store, token, username, timeZone }) {
@@ -91,6 +91,7 @@ export function webServer({ store, token, username, timeZone }) {
           groupLinked: space.groupChat !== null,
           invite: space.invite ? `https://t.me/${username}?start=${space.invite}` : null,
           linkCommand: `/link@${username}`,
+          categoryIcons,
         });
       }
       if (pathname === '/api/labels') {
@@ -103,8 +104,7 @@ export function webServer({ store, token, username, timeZone }) {
       if (labelRoute) {
         const id = Number(labelRoute[1]);
         if (request.method === 'PATCH') {
-          const { color } = await bodyOf(request);
-          return sendJson(response, 200, { label: store.setLabelColor(space.id, id, color) });
+          return sendJson(response, 200, { label: store.updateLabel(space.id, id, await bodyOf(request)) });
         }
         if (request.method === 'DELETE') {
           store.deleteLabel(space.id, id);
@@ -113,14 +113,16 @@ export function webServer({ store, token, username, timeZone }) {
       }
       if (pathname === '/api/tasks' && request.method === 'GET') {
         const tasks = store.list(space.id, queryOptions(url));
-        if (searchParams.get('include') !== 'summary') return sendJson(response, 200, { tasks });
-        const scope = searchParams.get('scope') ?? 'all';
-        const periodTasks = store.list(space.id, { scope });
+        const include = searchParams.get('include');
+        if (include !== 'summary' && include !== 'catalog') return sendJson(response, 200, { tasks });
         const catalog = store.catalog(space.id);
         const suggestions = {
           categories: catalog.categories.map(({ name }) => name),
           tags: catalog.tags.map(({ name }) => name),
         };
+        if (include === 'catalog') return sendJson(response, 200, { tasks, catalog, suggestions });
+        const scope = searchParams.get('scope') ?? 'all';
+        const periodTasks = store.list(space.id, { scope });
         const monthStats = scope.length === 4
           ? Object.fromEntries(Array.from({ length: 12 }, (_, index) => {
             const period = `${scope}-${String(index + 1).padStart(2, '0')}`;

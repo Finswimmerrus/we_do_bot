@@ -6,9 +6,9 @@ const ui = {
   view: 'backlog', panel: 'list', listRequest: 0, cardRequest: 0,
   filterStatus: { backlog: 'active', periods: 'all' },
   task: null, review: null, session: null,
-  catalog: { categories: [], tags: [] }, tagDraft: [], labelToDelete: null,
+  catalog: { categories: [] }, parents: [], labelToDelete: null,
 };
-const statusNames = { active: 'Активна', done: 'Выполнена', obsolete: 'Неактуальна' };
+const importanceNames = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
   done: { label: 'Завершить', notice: 'Задача завершена.' },
@@ -70,27 +70,38 @@ function periodLabel(period) {
 
 function selectedScope() {
   if (ui.view === 'backlog' && $('backlog-scope').value !== 'month') return $('backlog-scope').value;
-  if (ui.view === 'periods' && $('period-mode').value === 'year') {
+  if (ui.view !== 'backlog' && $('period-mode').value === 'year') {
     return $('scope-year').validity.valid && $('scope-year').value || ui.session.currentPeriod.slice(0, 4);
   }
   return /^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test($('scope-month').value) ? $('scope-month').value : ui.session.currentPeriod;
 }
 
-function fillSelect(select, values, emptyLabel) {
-  const previous = select.value;
-  select.replaceChildren(new Option(emptyLabel, ''), ...values.map((value) => new Option(value, value)));
-  select.value = values.includes(previous) ? previous : '';
+function categoryOption({ name, icon }) {
+  return `${ui.session.categoryIcons[icon || 'folder'][0]} ${name}`;
 }
 
-function labelChip(name, color) {
-  const chip = element('span', name, 'label-chip');
-  if (color) {
-    const dot = element('span', undefined, 'label-dot');
-    dot.style.backgroundColor = color;
-    dot.setAttribute('aria-hidden', 'true');
-    chip.prepend(dot);
-  }
+function fillCategoryFilter(categories) {
+  const select = $('filter-category');
+  const previous = select.value;
+  select.replaceChildren(new Option('Все', ''),
+    ...categories.map((category) => new Option(categoryOption(category), category.name)));
+  select.value = categories.some(({ name }) => name === previous) ? previous : '';
+}
+
+function categoryChip({ name, color, icon }) {
+  const chip = element('span', undefined, 'label-chip');
+  const [symbol] = ui.session.categoryIcons[icon || 'folder'];
+  const badge = element('span', symbol, 'category-icon');
+  if (color) badge.style.setProperty('--category-color', color);
+  badge.setAttribute('aria-hidden', 'true');
+  chip.append(badge, element('span', name));
   return chip;
+}
+
+function priorityBadge(importance) {
+  const badge = element('span', importanceNames[importance], 'importance-chip');
+  badge.dataset.importance = importance;
+  return badge;
 }
 
 function showStats(stats) {
@@ -123,20 +134,21 @@ function showYear(monthStats) {
 
 function taskRow(task) {
   const row = element('div', undefined, 'task-row');
-  const open = element('button', task.title, 'task-open');
+  row.dataset.status = task.status;
+  const open = element('button', undefined, 'task-open');
   open.type = 'button';
-  const fields = [statusNames[task.status], periodLabel(task.period)];
+  open.append(element('span', task.title, 'task-title'));
+  const fields = ui.view === 'periods' && selectedScope().length === 7 ? [] : [periodLabel(task.period)];
+  if (task.status === 'obsolete') fields.unshift('Отменена');
   if (task.parentTitle) fields.push(`к «${task.parentTitle}»`);
-  open.append(element('small', fields.join(' · ')));
-  const labels = task.tags.map((name) => ui.catalog.tags.find((label) => label.name === name) ?? { name });
+  if (fields.length) open.append(element('small', fields.join(' · ')));
+  const labels = element('span', undefined, 'task-labels');
   if (task.category) {
-    labels.unshift(ui.catalog.categories.find((label) => label.name === task.category) ?? { name: task.category });
+    const category = ui.catalog.categories.find(({ name }) => name === task.category) ?? { name: task.category };
+    labels.append(categoryChip(category));
   }
-  if (labels.length) {
-    const list = element('span', undefined, 'task-labels');
-    list.append(...labels.map(({ name, color }) => labelChip(name, color)));
-    open.append(list);
-  }
+  labels.append(priorityBadge(task.importance));
+  open.append(labels);
   open.addEventListener('click', () => run(() => openTask(task.id), open));
   const actions = element('div', undefined, 'task-status-actions');
   renderStatusActions(actions, task);
@@ -149,10 +161,18 @@ function renderStatusActions(container, task, card = false) {
     : task.status === 'active' ? ['done', 'obsolete'] : ['active'];
   const controls = available.map((status) => {
     const { label } = statusActions[status];
-    const button = element('button', label);
+    const button = element('button', status === 'active' ? label : undefined);
     button.type = 'button';
     button.dataset.statusAction = status;
-    if (!card) button.setAttribute('aria-label', `${label}: ${task.title}`);
+    if (status !== 'active') {
+      const icon = element('span', undefined, `action-icon ${status === 'done' ? 'icon-check' : 'icon-trash'}`);
+      if (status === 'obsolete') icon.append(element('i'));
+      icon.setAttribute('aria-hidden', 'true');
+      button.classList.add('icon-button');
+      button.title = label;
+      button.append(icon);
+    }
+    button.setAttribute('aria-label', card ? label : `${label}: ${task.title}`);
     button.addEventListener('click', () => run(async () => {
       controls.forEach((control) => { control.disabled = true; });
       try {
@@ -167,7 +187,10 @@ function renderStatusActions(container, task, card = false) {
 }
 
 function showTaskStatus(task) {
-  $('task-status-label').textContent = statusNames[task.status];
+  $('task-heading').dataset.status = task.status;
+  $('task-priority').replaceChildren(priorityBadge(task.importance));
+  $('task-status-label').textContent = 'Отменена';
+  $('task-status-label').hidden = task.status !== 'obsolete';
   renderStatusActions($('task-status-actions'), task, true);
 }
 
@@ -203,34 +226,41 @@ async function refreshVisibleTasks() {
 
 async function loadList() {
   const seq = ++ui.listRequest;
-  const periods = ui.view === 'periods';
+  const periods = ui.view !== 'backlog';
+  const statistics = ui.view === 'statistics';
   const scope = selectedScope();
-  const params = new URLSearchParams({
+  const params = statistics ? new URLSearchParams({ scope, include: 'summary' })
+    : new URLSearchParams({
     scope, status: $('filter-status').value, query: $('filter-query').value,
-    category: $('filter-category').value, tag: $('filter-tag').value, include: 'summary',
+    category: $('filter-category').value, importance: $('filter-importance').value, include: 'catalog',
   });
   $('period-mode-label').hidden = !periods;
   $('backlog-scope-label').hidden = periods;
   $('scope-month-label').hidden = periods ? $('period-mode').value === 'year' : $('backlog-scope').value !== 'month';
   $('scope-year-label').hidden = !periods || $('period-mode').value !== 'year';
+  for (const filter of document.querySelectorAll('[data-task-filter]')) filter.hidden = statistics;
   $('quick-add').hidden = periods;
-  $('review-start').hidden = !periods;
-  $('view-title').textContent = periods ? periodLabel(scope) : 'Бэклог';
-  $('stats').hidden = !periods;
-  if (!periods || scope.length !== 4) $('year-grid').hidden = true;
+  $('review-start').hidden = !statistics;
+  $('view-title').textContent = statistics ? 'Статистика' : periods ? periodLabel(scope) : 'Бэклог';
+  $('stats').hidden = !statistics;
+  $('task-list').hidden = statistics;
+  if (statistics) $('list-empty').hidden = true;
+  if (!statistics || scope.length !== 4) $('year-grid').hidden = true;
   $('task-list').setAttribute('aria-busy', 'true');
 
   try {
-    const { tasks, stats, monthStats, catalog, suggestions } = await api(`tasks?${params}`);
+    const { tasks, stats, monthStats, catalog } = await api(`tasks?${params}`);
     if (seq !== ui.listRequest) return;
+    if (statistics) {
+      showStats(stats);
+      showYear(monthStats);
+      return;
+    }
     ui.catalog = catalog;
-    fillSelect($('filter-category'), suggestions.categories, 'Все');
-    fillSelect($('filter-tag'), suggestions.tags, 'Все');
-    if ($('filter-category').value !== params.get('category') || $('filter-tag').value !== params.get('tag')) {
+    fillCategoryFilter(catalog.categories);
+    if ($('filter-category').value !== params.get('category')) {
       return await loadList();
     }
-    if (periods) showStats(stats);
-    showYear(monthStats);
     $('task-list').replaceChildren(...tasks.map(taskRow));
     $('list-empty').hidden = tasks.length > 0;
     $('list-empty').textContent = 'По этим фильтрам задач нет.';
@@ -244,7 +274,7 @@ function changeView(name) {
   for (const tab of document.querySelectorAll('[data-view]')) {
     tab.setAttribute('aria-current', tab.dataset.view === name ? 'page' : 'false');
   }
-  $('filter-status').value = ui.filterStatus[name];
+  if (name !== 'statistics') $('filter-status').value = ui.filterStatus[name];
   show('list');
   return loadList();
 }
@@ -268,54 +298,29 @@ function toggleCategoryInput() {
   if (adding) input.focus();
 }
 
-function renderTagDraft() {
-  const select = $('edit-tag');
-  const adding = !$('new-tag-field').hidden;
-  const selected = new Set(ui.tagDraft.map(({ id }) => id));
-  select.replaceChildren(new Option('Добавить тег', ''),
-    ...ui.catalog.tags.filter(({ id }) => !selected.has(id)).map(({ id, name }) => new Option(name, id)),
-    new Option('Новый тег…', 'new'));
-  if (adding) select.value = 'new';
-
-  $('selected-tags').replaceChildren(...ui.tagDraft.map((tag) => {
-    const group = element('span', undefined, 'selected-tag');
-    const remove = element('button', '×');
-    remove.type = 'button';
-    remove.setAttribute('aria-label', `Убрать тег «${tag.name}» из задачи`);
-    remove.addEventListener('click', () => {
-      ui.tagDraft = ui.tagDraft.filter((item) => item !== tag);
-      renderTagDraft();
-      select.focus();
-    });
-    group.append(labelChip(tag.name, tag.color), remove);
-    return group;
-  }));
-}
-
-function addDraftTag() {
-  const input = $('new-tag');
-  const name = input.value.trim().replace(/\s+/g, ' ');
-  if (!name) return;
-  const key = name.normalize('NFKC').toLowerCase();
-  const sameName = (tag) => tag.name.normalize('NFKC').toLowerCase() === key;
-  if (!ui.tagDraft.some(sameName)) ui.tagDraft.push(ui.catalog.tags.find(sameName) ?? { name });
-  input.value = '';
-  $('new-tag-field').hidden = true;
-  renderTagDraft();
-}
-
-function setTaskLabels(task) {
-  $('edit-category').replaceChildren(new Option('Без категории', ''),
-    ...ui.catalog.categories.map(({ id, name }) => new Option(name, id)),
-    new Option('Новая категория…', 'new'));
-  const category = ui.catalog.categories.find(({ name }) => name === task.category);
+function editCategory(name) {
+  const category = ui.catalog.categories.find((label) => label.name === name);
   $('edit-category').value = category ? category.id : '';
   $('new-category').value = '';
   toggleCategoryInput();
-  ui.tagDraft = task.tags.map((name) => ui.catalog.tags.find((tag) => tag.name === name) ?? { name });
-  $('new-tag-field').hidden = true;
-  $('new-tag').value = '';
-  renderTagDraft();
+}
+
+function updateParentFields() {
+  const parent = ui.parents.find(({ id }) => id === Number($('edit-parent').value));
+  const inherited = Boolean(parent);
+  const previouslyInherited = $('edit-period').disabled;
+  $('edit-period').disabled = inherited;
+  $('edit-category').disabled = inherited;
+  $('inherited-fields').hidden = !inherited;
+  const global = $('edit-importance').querySelector('option[value="global"]');
+  if (inherited && $('edit-importance').value === 'global') $('edit-importance').value = '';
+  global.hidden = inherited;
+  global.disabled = inherited;
+  if (parent || previouslyInherited) {
+    const source = parent ?? ui.task;
+    $('edit-period').value = source.period || '';
+    editCategory(source.category);
+  }
 }
 
 async function openTask(id) {
@@ -329,12 +334,17 @@ async function openTask(id) {
   showTaskStatus(task);
   $('edit-title').value = task.title;
   $('edit-period').value = task.period || '';
-  setTaskLabels(task);
-  const parents = tasks.filter((item) => item.id !== task.id && item.parentId === null);
+  $('edit-importance').value = task.importance;
+  $('edit-category').replaceChildren(new Option('Без категории', ''),
+    ...catalog.categories.map((category) => new Option(categoryOption(category), category.id)),
+    new Option('Новая категория…', 'new'));
+  editCategory(task.category);
+  ui.parents = tasks.filter((item) => item.id !== task.id && item.parentId === null);
   $('edit-parent').replaceChildren(new Option('Без родителя', ''),
-    ...parents.map((parent) => new Option(parent.title, parent.id)));
+    ...ui.parents.map((parent) => new Option(parent.title, parent.id)));
   $('edit-parent').value = task.parentId ?? '';
   $('edit-parent').disabled = children.length > 0;
+  updateParentFields();
   $('subtasks').hidden = task.parentId !== null;
   $('child-title').value = '';
   showChildren(children);
@@ -344,15 +354,16 @@ async function openTask(id) {
 async function updateTask() {
   const task = ui.task;
   const category = $('edit-category').value;
-  if (!$('new-tag-field').hidden) addDraftTag();
   const patch = {
     version: task.version,
     title: $('edit-title').value,
-    period: $('edit-period').value || null,
-    categoryChoice: category === 'new' ? { name: $('new-category').value } : category ? { id: Number(category) } : null,
-    tagChoices: ui.tagDraft.map(({ id, name }) => id ? { id } : { name }),
+    importance: $('edit-importance').value,
   };
   if (!$('edit-parent').disabled) patch.parentId = Number($('edit-parent').value) || null;
+  if (!$('edit-period').disabled) {
+    patch.period = $('edit-period').value || null;
+    patch.categoryChoice = category === 'new' ? { name: $('new-category').value } : category ? { id: Number(category) } : null;
+  }
   try {
     await api(`tasks/${task.id}`, patch, 'PATCH');
   } catch (error) {
@@ -381,6 +392,7 @@ function renderReview(tasks) {
   $('review-card').hidden = !review.task;
   $('review-move').hidden = true;
   if (review.task) {
+    $('review-card').querySelector('[data-review="move"]').hidden = review.task.parentId !== null;
     $('review-task-title').textContent = review.task.title;
     $('review-task-info').textContent =
       [periodLabel(review.task.period), review.task.parentTitle && `к «${review.task.parentTitle}»`].filter(Boolean).join(' · ');
@@ -426,9 +438,34 @@ async function openSettings() {
   show('settings');
 }
 
+function chooseCategoryIcon(label) {
+  const dialog = $('category-icon-dialog');
+  const choices = Object.entries(ui.session.categoryIcons).map(([icon, [symbol, name]]) => {
+    const button = element('button', symbol);
+    button.type = 'button';
+    button.title = name;
+    button.setAttribute('aria-label', name);
+    button.setAttribute('aria-pressed', String((label.icon || 'folder') === icon));
+    button.addEventListener('click', () => run(async () => {
+      await api(`labels/${label.id}`, { icon }, 'PATCH');
+      dialog.close();
+      await renderLabels();
+      notify('Иконка сохранена.');
+    }, button));
+    return button;
+  });
+  $('category-icon-options').replaceChildren(...choices);
+  dialog.showModal();
+}
+
 function labelManagerRow(label) {
   const row = element('li', undefined, 'label-row');
   const actions = element('div', undefined, 'label-row-actions');
+  const icon = element('button', 'Иконка');
+  icon.type = 'button';
+  icon.setAttribute('aria-label', `Иконка «${label.name}»`);
+  icon.addEventListener('click', () => chooseCategoryIcon(label));
+  actions.append(icon);
   const colorField = element('label', 'Цвет', 'label-color-field');
   const color = element('input');
   color.type = 'color';
@@ -467,26 +504,24 @@ function labelManagerRow(label) {
     dialog.showModal();
   });
   actions.append(remove);
-  row.append(labelChip(label.name, label.color), actions);
+  row.append(categoryChip(label), actions);
   return row;
 }
 
 async function renderLabels() {
   const { catalog } = await api('labels');
   ui.catalog = catalog;
-  for (const kind of ['categories', 'tags']) {
-    $(`${kind}-empty`).hidden = catalog[kind].length > 0;
-    $(`${kind}-list`).replaceChildren(...catalog[kind].map(labelManagerRow));
-  }
+  $('categories-empty').hidden = catalog.categories.length > 0;
+  $('categories-list').replaceChildren(...catalog.categories.map(labelManagerRow));
 }
 
 function bindUi() {
   for (const tab of document.querySelectorAll('[data-view]')) {
     tab.addEventListener('click', () => run(() => changeView(tab.dataset.view), tab));
   }
-  for (const id of ['period-mode', 'backlog-scope', 'scope-month', 'scope-year', 'filter-category', 'filter-tag', 'filter-status']) {
+  for (const id of ['period-mode', 'backlog-scope', 'scope-month', 'scope-year', 'filter-category', 'filter-importance', 'filter-status']) {
     $(id).addEventListener('change', () => {
-      ui.filterStatus[ui.view] = $('filter-status').value;
+      if (ui.view !== 'statistics') ui.filterStatus[ui.view] = $('filter-status').value;
       run(loadList);
     });
   }
@@ -511,24 +546,7 @@ function bindUi() {
     run(updateTask, event.submitter);
   });
   $('edit-category').addEventListener('change', toggleCategoryInput);
-  $('edit-tag').addEventListener('change', () => {
-    const value = $('edit-tag').value;
-    $('new-tag-field').hidden = value !== 'new';
-    if (value === 'new') {
-      $('new-tag').focus();
-    } else if (value) {
-      const label = ui.catalog.tags.find(({ id }) => id === Number(value));
-      if (label) ui.tagDraft.push(label);
-      renderTagDraft();
-    }
-  });
-  $('add-tag').addEventListener('click', addDraftTag);
-  $('new-tag').addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    addDraftTag();
-    $('edit-tag').focus();
-  });
+  $('edit-parent').addEventListener('change', updateParentFields);
   $('add-child').addEventListener('submit', (event) => {
     event.preventDefault();
     run(async () => {
@@ -539,7 +557,7 @@ function bindUi() {
     }, event.submitter);
   });
   $('review-start').addEventListener('click', () => run(startReview, $('review-start')));
-  $('review-back').addEventListener('click', () => run(() => changeView('periods')));
+  $('review-back').addEventListener('click', () => run(() => changeView('statistics')));
   for (const item of document.querySelectorAll('[data-review]')) {
     item.addEventListener('click', () => run(() => {
       const action = item.dataset.review;
@@ -563,17 +581,15 @@ function bindUi() {
     show('labels');
   }, $('open-labels')));
   $('labels-back').addEventListener('click', () => run(openSettings, $('labels-back')));
-  for (const kind of ['category', 'tag']) {
-    $(`add-${kind}-label`).addEventListener('submit', (event) => {
-      event.preventDefault();
-      run(async () => {
-        const input = $(`${kind}-label-name`);
-        await api('labels', { kind, name: input.value }, 'POST');
-        input.value = '';
-        await renderLabels();
-      }, event.submitter);
-    });
-  }
+  $('add-category-label').addEventListener('submit', (event) => {
+    event.preventDefault();
+    run(async () => {
+      const input = $('category-label-name');
+      await api('labels', { kind: 'category', name: input.value }, 'POST');
+      input.value = '';
+      await renderLabels();
+    }, event.submitter);
+  });
   $('delete-label-dialog').addEventListener('close', (event) => {
     const label = ui.labelToDelete;
     ui.labelToDelete = null;

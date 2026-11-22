@@ -5,9 +5,22 @@ import { DatabaseSync } from 'node:sqlite';
 import { exactPeriod, InputError, parseScope } from './periods.js';
 
 export const statuses = { active: 'Активна', done: 'Выполнена', obsolete: 'Неактуальна' };
+export const importanceLevels = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
+export const categoryIcons = {
+  folder: ['📁', 'Папка'], home: ['🏠', 'Дом'], shopping: ['🛒', 'Покупки'],
+  car: ['🚗', 'Машина'], travel: ['✈️', 'Поездки'], health: ['🩺', 'Здоровье'],
+  money: ['💳', 'Финансы'], work: ['💼', 'Работа'], tools: ['🔧', 'Ремонт'],
+  family: ['👪', 'Семья'], phone: ['📞', 'Звонки'], document: ['📄', 'Документы'],
+  sport: ['🏃', 'Спорт'], study: ['📚', 'Учёба'], gift: ['🎁', 'Подарки'],
+  pet: ['🐾', 'Питомцы'], food: ['🍽️', 'Еда'], calendar: ['📅', 'События'],
+  leaf: ['🌿', 'Природа'], idea: ['💡', 'Идеи'], entertainment: ['🎬', 'Досуг'],
+};
 
+const taskPeriod = 'CASE WHEN p.id IS NULL THEN t.period ELSE p.period END';
+const taskCategory = 'CASE WHEN p.id IS NULL THEN t.category ELSE p.category END';
 const taskFields = `
-  SELECT t.id, t.title, t.status, t.period, t.category, t.tags, t.parent_id AS parentId,
+  SELECT t.id, t.title, t.status, ${taskPeriod} AS period, ${taskCategory} AS category,
+    t.importance, t.tags, t.parent_id AS parentId,
     p.title AS parentTitle, t.created_by AS createdBy, t.created_at AS createdAt,
     t.completed_at AS completedAt, t.version
   FROM tasks AS t LEFT JOIN tasks AS p ON p.id = t.parent_id
@@ -131,7 +144,7 @@ export class Store {
         UNIQUE (space_id, kind, name_key)
       ) STRICT;
     `);
-    this.#migrateLabels();
+    this.#migrateSchema();
   }
 
   close() {
@@ -199,19 +212,30 @@ export class Store {
       .run(to, from, to);
   }
 
-  #migrateLabels() {
-    if (this.db.prepare('PRAGMA user_version').get().user_version >= 1) return;
+  #migrateSchema() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 2) return;
     this.transaction(() => {
-      if (this.db.prepare('PRAGMA user_version').get().user_version >= 1) return;
-      const tasks = this.db.prepare("SELECT id, space_id AS space, category, tags FROM tasks WHERE category IS NOT NULL OR tags != '[]' ORDER BY id").all();
-      const update = this.db.prepare('UPDATE tasks SET category = ?, tags = ?, version = version + 1 WHERE id = ?');
-      for (const task of tasks) {
-        const category = task.category ? this.#registerLabel(task.space, 'category', task.category).name : null;
-        const tags = JSON.stringify(this.#namesForTags(task.space, cleanTags(JSON.parse(task.tags))));
-        if (category !== task.category || tags !== task.tags) update.run(category, tags, task.id);
-      }
-      this.db.exec('PRAGMA user_version = 1');
+      const version = this.db.prepare('PRAGMA user_version').get().user_version;
+      if (version >= 2) return;
+      this.db.exec(`
+        ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
+          CHECK (importance IN ('low', 'medium', 'high', 'global'));
+        ALTER TABLE labels ADD COLUMN icon TEXT;
+      `);
+      if (version < 1) this.#migrateLabels();
+      this.db.prepare('UPDATE tasks SET version = version + 1 WHERE parent_id IS NOT NULL').run();
+      this.db.exec('PRAGMA user_version = 2');
     });
+  }
+
+  #migrateLabels() {
+    const tasks = this.db.prepare("SELECT id, space_id AS space, category, tags FROM tasks WHERE category IS NOT NULL OR tags != '[]' ORDER BY id").all();
+    const update = this.db.prepare('UPDATE tasks SET category = ?, tags = ?, version = version + 1 WHERE id = ?');
+    for (const task of tasks) {
+      const category = task.category ? this.#registerLabel(task.space, 'category', task.category).name : null;
+      const tags = JSON.stringify(this.#namesForTags(task.space, cleanTags(JSON.parse(task.tags))));
+      if (category !== task.category || tags !== task.tags) update.run(category, tags, task.id);
+    }
   }
 
   #registerLabel(space, kind, value) {
@@ -219,13 +243,13 @@ export class Store {
     const key = labelKey(name);
     this.db.prepare('INSERT INTO labels (space_id, kind, name, name_key) VALUES (?, ?, ?, ?) ON CONFLICT (space_id, kind, name_key) DO NOTHING')
       .run(space, kind, name, key);
-    return this.db.prepare('SELECT id, kind, name, color FROM labels WHERE space_id = ? AND kind = ? AND name_key = ?')
+    return this.db.prepare('SELECT id, kind, name, color, icon FROM labels WHERE space_id = ? AND kind = ? AND name_key = ?')
       .get(space, kind, key);
   }
 
   #labelById(space, id) {
     if (!isId(id)) throw new InputError('Некорректный номер категории или тега.');
-    const label = this.db.prepare('SELECT id, kind, name, color FROM labels WHERE space_id = ? AND id = ?').get(space, id);
+    const label = this.db.prepare('SELECT id, kind, name, color, icon FROM labels WHERE space_id = ? AND id = ?').get(space, id);
     if (!label) throw new InputError('Категория или тег уже удалены либо недоступны.', 404);
     return label;
   }
@@ -243,7 +267,7 @@ export class Store {
   }
 
   catalog(space) {
-    const labels = this.db.prepare('SELECT id, kind, name, color FROM labels WHERE space_id = ?').all(space)
+    const labels = this.db.prepare('SELECT id, kind, name, color, icon FROM labels WHERE space_id = ?').all(space)
       .sort((first, second) => first.name.localeCompare(second.name, 'ru'));
     return {
       categories: labels.filter(({ kind }) => kind === 'category'),
@@ -255,10 +279,18 @@ export class Store {
     return this.transaction(() => this.#registerLabel(space, kind, name));
   }
 
-  setLabelColor(space, id, color) {
+  updateLabel(space, id, patch) {
     return this.transaction(() => {
-      this.#labelById(space, id);
-      this.db.prepare('UPDATE labels SET color = ? WHERE space_id = ? AND id = ?').run(labelColor(color), space, id);
+      const label = this.#labelById(space, id);
+      if ('color' in patch) label.color = labelColor(patch.color);
+      if ('icon' in patch) {
+        if (label.kind !== 'category' || typeof patch.icon !== 'string' || !Object.hasOwn(categoryIcons, patch.icon)) {
+          throw new InputError('Выберите иконку категории.');
+        }
+        label.icon = patch.icon;
+      }
+      this.db.prepare('UPDATE labels SET color = ?, icon = ? WHERE space_id = ? AND id = ?')
+        .run(label.color, label.icon, space, id);
       return this.#labelById(space, id);
     });
   }
@@ -267,6 +299,10 @@ export class Store {
     return this.transaction(() => {
       const { kind, name } = this.#labelById(space, id);
       if (kind === 'category') {
+        this.db.prepare(`UPDATE tasks SET version = version + 1
+          WHERE space_id = ? AND category IS NOT ? AND parent_id IN
+          (SELECT id FROM tasks WHERE space_id = ? AND parent_id IS NULL AND category = ?)`)
+          .run(space, name, space, name);
         this.db.prepare('UPDATE tasks SET category = NULL, version = version + 1 WHERE space_id = ? AND category = ?')
           .run(space, name);
       } else {
@@ -352,6 +388,26 @@ export class Store {
       if (task.version !== patch.version) {
         throw new InputError('Задача уже изменилась. Откройте её заново.', 409);
       }
+      const previousPeriod = task.period;
+      const previousCategory = task.category;
+      if ('parentId' in patch && patch.parentId !== task.parentId) {
+        if (patch.parentId !== null) {
+          if (patch.parentId === id) throw new InputError('Задача не может быть своим родителем.');
+          if (this.task(space, patch.parentId).parentId !== null || this.children(space, id).length) {
+            throw new InputError('Доступен один уровень подзадач.');
+          }
+        }
+        task.parentId = patch.parentId;
+      }
+      if ('importance' in patch) {
+        if (typeof patch.importance !== 'string' || !Object.hasOwn(importanceLevels, patch.importance)) {
+          throw new InputError('Выберите важность задачи.');
+        }
+        task.importance = patch.importance;
+      }
+      if (task.parentId !== null && task.importance === 'global') {
+        throw new InputError('Глобальная важность доступна только задачам верхнего уровня.');
+      }
       if ('title' in patch) task.title = taskTitle(patch.title);
       if ('status' in patch) {
         if (typeof patch.status !== 'string' || !Object.hasOwn(statuses, patch.status)) {
@@ -362,12 +418,20 @@ export class Store {
           task.completedAt = task.status === 'done' ? new Date().toISOString() : null;
         }
       }
-      if ('period' in patch) task.period = patch.period === null ? null : exactPeriod(patch.period);
-      if ('categoryChoice' in patch) {
-        task.category = patch.categoryChoice === null ? null : this.#chosenLabel(space, 'category', patch.categoryChoice);
-      } else if ('category' in patch) {
-        const name = patch.category === null ? '' : cleanText(patch.category, 60, 'Категория');
-        task.category = name ? this.#registerLabel(space, 'category', name).name : null;
+      if (task.parentId !== null) {
+        if ('period' in patch || 'categoryChoice' in patch || 'category' in patch) {
+          throw new InputError('Период и категория подзадачи задаются в карточке родителя.');
+        }
+        task.period = null;
+        task.category = null;
+      } else {
+        if ('period' in patch) task.period = patch.period === null ? null : exactPeriod(patch.period);
+        if ('categoryChoice' in patch) {
+          task.category = patch.categoryChoice === null ? null : this.#chosenLabel(space, 'category', patch.categoryChoice);
+        } else if ('category' in patch) {
+          const name = patch.category === null ? '' : cleanText(patch.category, 60, 'Категория');
+          task.category = name ? this.#registerLabel(space, 'category', name).name : null;
+        }
       }
       if ('tagChoices' in patch) {
         if (!Array.isArray(patch.tagChoices) || patch.tagChoices.length > 20) {
@@ -377,37 +441,36 @@ export class Store {
       } else if ('tags' in patch) {
         task.tags = this.#namesForTags(space, cleanTags(patch.tags));
       }
-      if ('parentId' in patch && patch.parentId !== task.parentId) {
-        if (patch.parentId !== null) {
-          if (patch.parentId === id) throw new InputError('Задача не может быть своим родителем.');
-          if (this.task(space, patch.parentId).parentId !== null || this.children(space, id).length) {
-            throw new InputError('Доступен один уровень подзадач.');
-          }
-        }
-        task.parentId = patch.parentId;
-      }
       this.db.prepare(`
-        UPDATE tasks SET title = ?, status = ?, period = ?, category = ?, tags = ?, parent_id = ?,
+        UPDATE tasks SET title = ?, status = ?, period = ?, category = ?, importance = ?, tags = ?, parent_id = ?,
           completed_at = ?, version = version + 1 WHERE space_id = ? AND id = ?
-      `).run(task.title, task.status, task.period, task.category, JSON.stringify(task.tags),
+      `).run(task.title, task.status, task.period, task.category, task.importance, JSON.stringify(task.tags),
         task.parentId, task.completedAt, space, id);
+      if (task.parentId === null && (task.period !== previousPeriod || task.category !== previousCategory)) {
+        this.db.prepare('UPDATE tasks SET version = version + 1 WHERE space_id = ? AND parent_id = ?').run(space, id);
+      }
       return this.task(space, id);
     });
   }
 
-  list(space, { scope = 'all', status = 'all', query = '', category = '', tag = '' } = {}) {
+  list(space, { scope = 'all', status = 'all', query = '', category = '', tag = '', importance = '' } = {}) {
     parseScope(scope);
     if (status !== 'all' && !Object.hasOwn(statuses, status)) throw new InputError('Выберите статус задачи.');
     const filters = ['t.space_id = ?'];
     const args = [space];
-    if (scope === 'none') filters.push('t.period IS NULL');
+    if (scope === 'none') filters.push(`(${taskPeriod}) IS NULL`);
     else if (scope !== 'all') {
-      filters.push(scope.length === 4 ? 'substr(t.period, 1, 4) = ?' : 't.period = ?');
+      filters.push(scope.length === 4 ? `substr((${taskPeriod}), 1, 4) = ?` : `(${taskPeriod}) = ?`);
       args.push(scope);
     }
     if (status !== 'all') {
       filters.push('t.status = ?');
       args.push(status);
+    }
+    if (importance) {
+      if (!Object.hasOwn(importanceLevels, importance)) throw new InputError('Выберите важность задачи.');
+      filters.push('t.importance = ?');
+      args.push(importance);
     }
     const term = query.trim().toLowerCase();
     const rows = this.db.prepare(`${taskFields} WHERE ${filters.join(' AND ')} ORDER BY t.id DESC`).all(...args);
