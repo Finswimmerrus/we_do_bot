@@ -141,7 +141,14 @@ label input, label select { font-size: 1rem; }
 dialog { width: min(28rem, calc(100% - 2rem)); padding: 1.2rem; border: 1px solid var(--line); border-radius: .85rem; color: var(--ink); background: var(--surface); }
 dialog::backdrop { background: #252d2680; }
 @media (max-width: 550px) {
-  .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .tabs { display: flex; gap: .25rem; overflow-x: auto; }
+  .tabs button {
+    flex: 1 0 auto;
+    min-height: 2.5rem;
+    padding: .35rem clamp(.18rem, .8vw, .4rem);
+    font-size: clamp(.67rem, 3.35vw, .85rem);
+    white-space: nowrap;
+  }
   .task-row .task-status-actions { flex-wrap: nowrap; gap: .25rem; }
 }
 @media (max-width: 345px) { .editor { grid-template-columns: minmax(0, 1fr); } }
