@@ -349,6 +349,7 @@ function categoryChoice(value, inputId) {
 }
 
 function prepareChildForm(task) {
+  $('child-options').open = false;
   const defaults = task.category
     ? [new Option(`Как у родителя · ${task.category}`, 'inherit'), new Option('Без категории', '')]
     : [new Option('Без категории', 'inherit')];
@@ -611,6 +612,7 @@ function bindUi() {
   }, $('delete-subtask')));
   $('edit-category').addEventListener('change', () => toggleCategoryInput('edit-category', 'new-category-field', 'new-category'));
   $('edit-parent').addEventListener('change', updateImportanceChoices);
+  $('child-options').addEventListener('invalid', () => { $('child-options').open = true; }, true);
   $('child-category').addEventListener('change', () => toggleCategoryInput('child-category', 'child-category-new-field', 'child-category-new'));
   $('add-child').addEventListener('submit', (event) => {
     event.preventDefault();

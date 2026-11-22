@@ -101,13 +101,16 @@
               <input id="child-title" placeholder="Новая подзадача" aria-label="Название подзадачи" maxlength="200" required>
               <button type="submit">Добавить</button>
             </div>
-            <div class="editor">
-              <label>Категория<select id="child-category"></select></label>
-              <label>Месяц<input id="child-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
-              <label id="child-category-new-field" class="wide" hidden>Название новой категории
-                <input id="child-category-new" maxlength="60" required disabled>
-              </label>
-            </div>
+            <details id="child-options" class="child-options">
+              <summary>Параметры подзадачи</summary>
+              <div class="editor">
+                <label>Категория подзадачи<select id="child-category"></select></label>
+                <label>Месяц подзадачи<input id="child-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
+                <label id="child-category-new-field" class="wide" hidden>Название новой категории
+                  <input id="child-category-new" maxlength="60" required disabled>
+                </label>
+              </div>
+            </details>
           </form>
         </div>
       </section>

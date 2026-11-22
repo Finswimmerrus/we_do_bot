@@ -105,6 +105,8 @@ label input, label select { font-size: 1rem; }
 .icon-trash i { position: absolute; width: .36rem; height: .14rem; top: .06rem; left: .395rem; border: 1.5px solid currentColor; border-radius: .1rem .1rem 0 0; }
 .card { margin-top: .8rem; padding: 1rem; }
 .editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+.child-options summary { cursor: pointer; color: var(--accent); font-size: .9rem; padding: .55rem 0; }
+.child-options[open] summary { margin-bottom: .35rem; }
 .wide { grid-column: 1 / -1; }
 .back { margin-bottom: .6rem; margin-left: -.45rem; }
 .actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .6rem; }
