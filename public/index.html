@@ -78,7 +78,6 @@
           <label id="new-category-field" class="wide" hidden>Название новой категории
             <input id="new-category" maxlength="60" required disabled>
           </label>
-          <p id="inherited-fields" class="wide field-note" hidden>Период и категория берутся из родительской задачи.</p>
           <label>Важность
             <select id="edit-importance" required>
               <option value="" disabled>Выберите важность</option>
@@ -93,9 +92,18 @@
           <h2>Подзадачи</h2>
           <p id="subtask-progress"></p>
           <div id="child-list" class="task-list"></div>
-          <form id="add-child" class="quick-add">
-            <input id="child-title" placeholder="Новая подзадача" aria-label="Название подзадачи" maxlength="200" required>
-            <button type="submit">Добавить</button>
+          <form id="add-child">
+            <div class="quick-add">
+              <input id="child-title" placeholder="Новая подзадача" aria-label="Название подзадачи" maxlength="200" required>
+              <button type="submit">Добавить</button>
+            </div>
+            <div class="editor">
+              <label>Категория<select id="child-category"></select></label>
+              <label>Месяц<input id="child-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
+              <label id="child-category-new-field" class="wide" hidden>Название новой категории
+                <input id="child-category-new" maxlength="60" required disabled>
+              </label>
+            </div>
           </form>
         </div>
       </section>

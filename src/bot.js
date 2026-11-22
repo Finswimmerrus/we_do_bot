@@ -487,7 +487,7 @@ export class Bot {
       ]);
     }
     return this.show(ctx, text, [
-      task.parentId === null ? [button('Перенести', `${prefix}:pick:${shiftMonth(task.period, 1) ?? task.period}`)] : [],
+      [button('Перенести', `${prefix}:pick:${shiftMonth(task.period, 1) ?? task.period}`)],
       [button(statusActions.done.label, `${prefix}:done`), button(statusActions.obsolete.label, `${prefix}:obsolete`),
         button('Оставить', `${prefix}:skip`)],
     ]);
@@ -503,9 +503,6 @@ export class Bot {
     if (task?.id !== Number(id) || task.version !== Number(version)) {
       await this.showReview(ctx, key);
       return 'Список обновлён.';
-    }
-    if (task.parentId !== null && (action === 'pick' || action === 'move')) {
-      throw new InputError('Период подзадачи меняется вместе с родительской задачей.');
     }
     if (action === 'pick') return void await this.showReview(ctx, key, exactPeriod(target));
     if (action === 'back') return void await this.showReview(ctx, key);

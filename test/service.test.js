@@ -169,7 +169,32 @@ test('каталог переносит старые категории и те�
   }
 });
 
-test('Mini App видит изменения бота, наследует период и категорию и ограничивает доступ', async (t) => {
+test('переход со схемы 2 сохраняет собственный месяц и заполняет отсутствующую категорию один раз', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'we-do-subtasks-'));
+  const path = join(directory, 'tasks.sqlite');
+  const old = new Store(path);
+  const { id: space } = old.joinOrCreate(11);
+  const parent = old.createTask(space, 11, { title: 'Поездка', category: 'Отдых', period: '2026-11' });
+  const child = old.createTask(space, 11, { title: 'Забронировать отель', parentId: parent.id, period: '2026-10', categoryChoice: null });
+  const childWithoutMonth = old.createTask(space, 11, { title: 'Купить билеты', parentId: parent.id, category: 'Билеты' });
+  old.db.exec('PRAGMA user_version = 2');
+  old.close();
+
+  const store = new Store(path);
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true });
+  });
+  assert.equal(store.task(space, child.id).category, 'Отдых');
+  assert.equal(store.task(space, child.id).period, '2026-10');
+  assert.equal(store.task(space, childWithoutMonth.id).period, null);
+  assert.equal(store.task(space, childWithoutMonth.id).category, 'Билеты');
+  store.updateTask(space, parent.id, { version: parent.version, category: 'Другое', period: '2026-12' });
+  assert.equal(store.task(space, child.id).category, 'Отдых');
+  assert.equal(store.task(space, child.id).period, '2026-10');
+});
+
+test('Mini App копирует категорию при создании и сохраняет свой период подзадачи', async (t) => {
   const { store, receive, last } = setup(t);
   await receive(11, '/start');
   await receive(22, `/start ${store.spaceFor(11).invite}`);
@@ -195,35 +220,34 @@ test('Mini App видит изменения бота, наследует пер
   assert.equal(parent.title, 'Поездка');
   assert.equal((await call(`tasks/${parent.id}`, { initData: signed(33) })).code, 404);
 
+  const patch = (task, data) => call(`tasks/${task.id}`, { method: 'PATCH', body: { version: task.version, ...data } });
+  const { data: { task: plannedParent } } = await patch(parent, { period: '2026-10', category: 'Быт', importance: 'global' });
   const { code, data: { task: child } } = await call('tasks', { method: 'POST', body: { title: 'Билеты', parentId: parent.id } });
   assert.equal(code, 201);
   assert.equal(child.period, null);
+  assert.equal(child.category, 'Быт');
   assert.equal((await call('tasks', { method: 'POST', body: { title: 'Ещё уровень', parentId: child.id } })).code, 400);
-  assert.equal((await call(`tasks/${parent.id}`, { method: 'PATCH', body: { version: parent.version, parentId: child.id } })).code, 400);
-
-  const patch = (task, data) => call(`tasks/${task.id}`, { method: 'PATCH', body: { version: task.version, ...data } });
-  assert.equal((await patch(child, { period: '2026-10', category: 'Быт' })).code, 400);
-  const { data: { task: plannedParent } } = await patch(parent, { period: '2026-10', category: 'Быт', importance: 'global' });
-  const { data: { task: plannedChild } } = await call(`tasks/${child.id}`);
+  assert.equal((await patch(plannedParent, { parentId: child.id })).code, 400);
+  assert.equal((await patch(child, { importance: 'global' })).code, 400);
+  const { data: { task: plannedChild } } = await patch(child, { period: '2026-10', tags: ['Дом', 'дом'], importance: 'high' });
   assert.equal(plannedChild.period, '2026-10');
   assert.equal(plannedChild.category, 'Быт');
-  assert.equal(plannedChild.importance, 'low');
-  assert.equal((await patch(child, { status: 'done' })).code, 409);
-  assert.equal((await patch(plannedChild, { importance: 'global' })).code, 400);
-  assert.equal((await patch(plannedChild, { tags: ['Дом', 'дом'], importance: 'high' })).code, 200);
-  assert.equal((await patch(plannedParent, { period: '2026-11', status: 'done' })).code, 200);
+  assert.equal(plannedChild.importance, 'high');
+  assert.equal((await patch(plannedParent, { period: '2026-11', category: 'Поездки', status: 'done' })).code, 200);
   assert.equal((await patch(parent, { status: 'obsolete' })).code, 409);
   const { data } = await call('tasks?scope=2026&include=summary');
-  assert.equal(data.monthStats['2026-10'].active, 0);
-  assert.equal(data.monthStats['2026-11'].active, 1);
+  assert.equal(data.monthStats['2026-10'].active, 1);
+  assert.equal(data.monthStats['2026-11'].active, 0);
   assert.equal(data.monthStats['2026-11'].done, 1);
-  assert.deepEqual(data.tasks.find((task) => task.id === child.id).tags, ['дом']);
+  const savedChild = data.tasks.find((task) => task.id === child.id);
+  assert.deepEqual(savedChild.tags, ['дом']);
+  assert.equal(savedChild.category, 'Быт');
   assert.equal(data.stats.percent, 50);
   assert.equal(taskStats([{ status: 'obsolete' }]).percent, null);
-  const { data: { tasks: filtered } } = await call('tasks?scope=2026-11&importance=high&include=catalog');
+  const { data: { tasks: filtered } } = await call('tasks?scope=2026-10&importance=high&include=catalog');
   assert.deepEqual(filtered.map(({ id }) => id), [child.id]);
 
-  await receive(11, '/backlog ноябрь');
+  await receive(11, '/backlog октябрь');
   assert.match(last('sendMessage').text, /Билеты · к «Поездка»/);
   await receive(11, '/month ноябрь');
   const monthReport = last('sendMessage');
@@ -242,6 +266,16 @@ test('Mini App видит изменения бота, наследует пер
   assert.equal(updatedCategory.icon, 'home');
   assert.equal(updatedCategory.color, '#aa4400');
   const currentParent = data.tasks.find((task) => task.id === parent.id);
+  const { data: { task: override } } = await call('tasks', {
+    method: 'POST', body: { title: 'Отель', parentId: parent.id, period: '2026-12', categoryChoice: { id: category.id } },
+  });
+  assert.equal(override.category, 'Быт');
+  assert.equal(override.period, '2026-12');
+  const { data: { task: blank } } = await call('tasks', {
+    method: 'POST', body: { title: 'Список вещей', parentId: parent.id, categoryChoice: null },
+  });
+  assert.equal(blank.category, null);
+  assert.equal(blank.period, null);
   assert.equal((await patch(currentParent, { categoryChoice: { id: category.id }, tagChoices: [{ id: tag.id }, { name: 'Для двоих' }] })).code, 200);
   assert.equal((await call(`labels/${tag.id}`, { method: 'PATCH', body: { color: '#4287AF' } })).data.label.color, '#4287af');
   const repeated = await call('labels', { method: 'POST', body: { kind: 'category', name: ' быт ' } });

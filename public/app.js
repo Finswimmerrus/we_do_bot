@@ -6,7 +6,7 @@ const ui = {
   view: 'backlog', panel: 'list', listRequest: 0, cardRequest: 0,
   filterStatus: { backlog: 'active', periods: 'all' },
   task: null, review: null, session: null,
-  catalog: { categories: [] }, parents: [], labelToDelete: null,
+  catalog: { categories: [] }, labelToDelete: null,
 };
 const importanceNames = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
 const statusActions = {
@@ -290,10 +290,10 @@ function showChildren(children) {
   $('child-list').replaceChildren(...children.map(taskRow));
 }
 
-function toggleCategoryInput() {
-  const input = $('new-category');
-  const adding = $('edit-category').value === 'new';
-  $('new-category-field').hidden = !adding;
+function toggleCategoryInput(selectId, fieldId, inputId) {
+  const input = $(inputId);
+  const adding = $(selectId).value === 'new';
+  $(fieldId).hidden = !adding;
   input.disabled = !adding;
   if (adding) input.focus();
 }
@@ -302,25 +302,33 @@ function editCategory(name) {
   const category = ui.catalog.categories.find((label) => label.name === name);
   $('edit-category').value = category ? category.id : '';
   $('new-category').value = '';
-  toggleCategoryInput();
+  toggleCategoryInput('edit-category', 'new-category-field', 'new-category');
 }
 
-function updateParentFields() {
-  const parent = ui.parents.find(({ id }) => id === Number($('edit-parent').value));
-  const inherited = Boolean(parent);
-  const previouslyInherited = $('edit-period').disabled;
-  $('edit-period').disabled = inherited;
-  $('edit-category').disabled = inherited;
-  $('inherited-fields').hidden = !inherited;
+function updateImportanceChoices() {
+  const isSubtask = Boolean($('edit-parent').value);
   const global = $('edit-importance').querySelector('option[value="global"]');
-  if (inherited && $('edit-importance').value === 'global') $('edit-importance').value = '';
-  global.hidden = inherited;
-  global.disabled = inherited;
-  if (parent || previouslyInherited) {
-    const source = parent ?? ui.task;
-    $('edit-period').value = source.period || '';
-    editCategory(source.category);
-  }
+  if (isSubtask && $('edit-importance').value === 'global') $('edit-importance').value = '';
+  global.hidden = isSubtask;
+  global.disabled = isSubtask;
+}
+
+function categoryChoice(value, inputId) {
+  if (value === 'new') return { name: $(inputId).value };
+  return value ? { id: Number(value) } : null;
+}
+
+function prepareChildForm(task) {
+  const defaults = task.category
+    ? [new Option(`Как у родителя · ${task.category}`, 'inherit'), new Option('Без категории', '')]
+    : [new Option('Без категории', 'inherit')];
+  $('child-category').replaceChildren(...defaults,
+    ...ui.catalog.categories.map((category) => new Option(categoryOption(category), category.id)),
+    new Option('Новая категория…', 'new'));
+  $('child-title').value = '';
+  $('child-period').value = '';
+  $('child-category-new').value = '';
+  toggleCategoryInput('child-category', 'child-category-new-field', 'child-category-new');
 }
 
 async function openTask(id) {
@@ -339,31 +347,28 @@ async function openTask(id) {
     ...catalog.categories.map((category) => new Option(categoryOption(category), category.id)),
     new Option('Новая категория…', 'new'));
   editCategory(task.category);
-  ui.parents = tasks.filter((item) => item.id !== task.id && item.parentId === null);
+  const parents = tasks.filter((item) => item.id !== task.id && item.parentId === null);
   $('edit-parent').replaceChildren(new Option('Без родителя', ''),
-    ...ui.parents.map((parent) => new Option(parent.title, parent.id)));
+    ...parents.map((parent) => new Option(parent.title, parent.id)));
   $('edit-parent').value = task.parentId ?? '';
   $('edit-parent').disabled = children.length > 0;
-  updateParentFields();
+  updateImportanceChoices();
   $('subtasks').hidden = task.parentId !== null;
-  $('child-title').value = '';
+  if (task.parentId === null) prepareChildForm(task);
   showChildren(children);
   show('task');
 }
 
 async function updateTask() {
   const task = ui.task;
-  const category = $('edit-category').value;
   const patch = {
     version: task.version,
     title: $('edit-title').value,
     importance: $('edit-importance').value,
+    period: $('edit-period').value || null,
+    categoryChoice: categoryChoice($('edit-category').value, 'new-category'),
   };
   if (!$('edit-parent').disabled) patch.parentId = Number($('edit-parent').value) || null;
-  if (!$('edit-period').disabled) {
-    patch.period = $('edit-period').value || null;
-    patch.categoryChoice = category === 'new' ? { name: $('new-category').value } : category ? { id: Number(category) } : null;
-  }
   try {
     await api(`tasks/${task.id}`, patch, 'PATCH');
   } catch (error) {
@@ -392,7 +397,6 @@ function renderReview(tasks) {
   $('review-card').hidden = !review.task;
   $('review-move').hidden = true;
   if (review.task) {
-    $('review-card').querySelector('[data-review="move"]').hidden = review.task.parentId !== null;
     $('review-task-title').textContent = review.task.title;
     $('review-task-info').textContent =
       [periodLabel(review.task.period), review.task.parentTitle && `к «${review.task.parentTitle}»`].filter(Boolean).join(' · ');
@@ -545,13 +549,17 @@ function bindUi() {
     event.preventDefault();
     run(updateTask, event.submitter);
   });
-  $('edit-category').addEventListener('change', toggleCategoryInput);
-  $('edit-parent').addEventListener('change', updateParentFields);
+  $('edit-category').addEventListener('change', () => toggleCategoryInput('edit-category', 'new-category-field', 'new-category'));
+  $('edit-parent').addEventListener('change', updateImportanceChoices);
+  $('child-category').addEventListener('change', () => toggleCategoryInput('child-category', 'child-category-new-field', 'child-category-new'));
   $('add-child').addEventListener('submit', (event) => {
     event.preventDefault();
     run(async () => {
       const parentId = ui.task.id;
-      await api('tasks', { title: $('child-title').value, parentId }, 'POST');
+      const category = $('child-category').value;
+      const body = { title: $('child-title').value, parentId, period: $('child-period').value || null };
+      if (category !== 'inherit') body.categoryChoice = categoryChoice(category, 'child-category-new');
+      await api('tasks', body, 'POST');
       await openTask(parentId);
       notify('Подзадача добавлена.');
     }, event.submitter);

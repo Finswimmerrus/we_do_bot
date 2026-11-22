@@ -16,10 +16,8 @@ export const categoryIcons = {
   leaf: ['🌿', 'Природа'], idea: ['💡', 'Идеи'], entertainment: ['🎬', 'Досуг'],
 };
 
-const taskPeriod = 'CASE WHEN p.id IS NULL THEN t.period ELSE p.period END';
-const taskCategory = 'CASE WHEN p.id IS NULL THEN t.category ELSE p.category END';
 const taskFields = `
-  SELECT t.id, t.title, t.status, ${taskPeriod} AS period, ${taskCategory} AS category,
+  SELECT t.id, t.title, t.status, t.period, t.category,
     t.importance, t.tags, t.parent_id AS parentId,
     p.title AS parentTitle, t.created_by AS createdBy, t.created_at AS createdAt,
     t.completed_at AS completedAt, t.version
@@ -213,18 +211,26 @@ export class Store {
   }
 
   #migrateSchema() {
-    if (this.db.prepare('PRAGMA user_version').get().user_version >= 2) return;
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 3) return;
     this.transaction(() => {
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
-      if (version >= 2) return;
-      this.db.exec(`
-        ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
-          CHECK (importance IN ('low', 'medium', 'high', 'global'));
-        ALTER TABLE labels ADD COLUMN icon TEXT;
-      `);
-      if (version < 1) this.#migrateLabels();
-      this.db.prepare('UPDATE tasks SET version = version + 1 WHERE parent_id IS NOT NULL').run();
-      this.db.exec('PRAGMA user_version = 2');
+      if (version >= 3) return;
+      if (version < 2) {
+        this.db.exec(`
+          ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
+            CHECK (importance IN ('low', 'medium', 'high', 'global'));
+          ALTER TABLE labels ADD COLUMN icon TEXT;
+        `);
+        if (version < 1) this.#migrateLabels();
+      } else {
+        this.db.exec(`
+          UPDATE tasks AS child
+          SET category = COALESCE(child.category, (SELECT parent.category FROM tasks AS parent WHERE parent.id = child.parent_id)),
+            version = version + 1
+          WHERE child.parent_id IS NOT NULL;
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 3');
     });
   }
 
@@ -260,6 +266,17 @@ export class Store {
     const label = this.#labelById(space, choice.id);
     if (label.kind !== kind) throw new InputError('Выберите значение из нужного списка.');
     return label.name;
+  }
+
+  #categoryFromInput(space, input, fallback) {
+    if ('categoryChoice' in input) {
+      return input.categoryChoice === null ? null : this.#chosenLabel(space, 'category', input.categoryChoice);
+    }
+    if ('category' in input) {
+      const name = input.category === null ? '' : cleanText(input.category, 60, 'Категория');
+      return name ? this.#registerLabel(space, 'category', name).name : null;
+    }
+    return fallback;
   }
 
   #namesForTags(space, names) {
@@ -299,10 +316,6 @@ export class Store {
     return this.transaction(() => {
       const { kind, name } = this.#labelById(space, id);
       if (kind === 'category') {
-        this.db.prepare(`UPDATE tasks SET version = version + 1
-          WHERE space_id = ? AND category IS NOT ? AND parent_id IN
-          (SELECT id FROM tasks WHERE space_id = ? AND parent_id IS NULL AND category = ?)`)
-          .run(space, name, space, name);
         this.db.prepare('UPDATE tasks SET category = NULL, version = version + 1 WHERE space_id = ? AND category = ?')
           .run(space, name);
       } else {
@@ -330,23 +343,29 @@ export class Store {
       .all(space, id).map(asTask);
   }
 
-  #insertTask(space, user, title, parentId, source) {
-    const { lastInsertRowid } = this.db.prepare('INSERT INTO tasks (space_id, title, parent_id, created_by, created_at, source) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(space, title, parentId, user, new Date().toISOString(), source);
+  #insertTask(space, user, { title, parentId = null, period = null, category = null, source = null }) {
+    const { lastInsertRowid } = this.db.prepare(`
+      INSERT INTO tasks (space_id, title, parent_id, period, category, created_by, created_at, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(space, title, parentId, period, category, user, new Date().toISOString(), source);
     return Number(lastInsertRowid);
   }
 
-  createTask(space, user, { title, parentId = null }, source = null) {
+  createTask(space, user, input, source = null) {
+    const { title, parentId = null, period = null } = input;
     const name = taskTitle(title);
     return this.transaction(() => {
       if (source) {
         const existing = this.db.prepare('SELECT id FROM tasks WHERE space_id = ? AND source = ?').get(space, source);
         if (existing) return this.task(space, existing.id);
       }
-      if (parentId !== null && this.task(space, parentId).parentId !== null) {
+      const parent = parentId === null ? null : this.task(space, parentId);
+      if (parent && parent.parentId !== null) {
         throw new InputError('Подзадачу можно добавить только к задаче верхнего уровня.');
       }
-      return this.task(space, this.#insertTask(space, user, name, parentId, source));
+      const category = this.#categoryFromInput(space, input, parent?.category ?? null);
+      const taskPeriod = period === null ? null : exactPeriod(period);
+      return this.task(space, this.#insertTask(space, user, { title: name, parentId, period: taskPeriod, category, source }));
     });
   }
 
@@ -375,7 +394,7 @@ export class Store {
       const tasks = [];
       for (const [index, title] of [...titles.entries()].reverse()) {
         const source = ['voice', job.chat, job.message, index].join(':');
-        const id = this.#insertTask(job.space, job.user, taskTitle(title), null, source);
+        const id = this.#insertTask(job.space, job.user, { title: taskTitle(title), source });
         tasks.push(this.task(job.space, id));
       }
       return tasks.reverse();
@@ -388,8 +407,6 @@ export class Store {
       if (task.version !== patch.version) {
         throw new InputError('Задача уже изменилась. Откройте её заново.', 409);
       }
-      const previousPeriod = task.period;
-      const previousCategory = task.category;
       if ('parentId' in patch && patch.parentId !== task.parentId) {
         if (patch.parentId !== null) {
           if (patch.parentId === id) throw new InputError('Задача не может быть своим родителем.');
@@ -418,21 +435,8 @@ export class Store {
           task.completedAt = task.status === 'done' ? new Date().toISOString() : null;
         }
       }
-      if (task.parentId !== null) {
-        if ('period' in patch || 'categoryChoice' in patch || 'category' in patch) {
-          throw new InputError('Период и категория подзадачи задаются в карточке родителя.');
-        }
-        task.period = null;
-        task.category = null;
-      } else {
-        if ('period' in patch) task.period = patch.period === null ? null : exactPeriod(patch.period);
-        if ('categoryChoice' in patch) {
-          task.category = patch.categoryChoice === null ? null : this.#chosenLabel(space, 'category', patch.categoryChoice);
-        } else if ('category' in patch) {
-          const name = patch.category === null ? '' : cleanText(patch.category, 60, 'Категория');
-          task.category = name ? this.#registerLabel(space, 'category', name).name : null;
-        }
-      }
+      if ('period' in patch) task.period = patch.period === null ? null : exactPeriod(patch.period);
+      task.category = this.#categoryFromInput(space, patch, task.category);
       if ('tagChoices' in patch) {
         if (!Array.isArray(patch.tagChoices) || patch.tagChoices.length > 20) {
           throw new InputError('Добавьте до 20 тегов.');
@@ -446,9 +450,6 @@ export class Store {
           completed_at = ?, version = version + 1 WHERE space_id = ? AND id = ?
       `).run(task.title, task.status, task.period, task.category, task.importance, JSON.stringify(task.tags),
         task.parentId, task.completedAt, space, id);
-      if (task.parentId === null && (task.period !== previousPeriod || task.category !== previousCategory)) {
-        this.db.prepare('UPDATE tasks SET version = version + 1 WHERE space_id = ? AND parent_id = ?').run(space, id);
-      }
       return this.task(space, id);
     });
   }
@@ -458,9 +459,9 @@ export class Store {
     if (status !== 'all' && !Object.hasOwn(statuses, status)) throw new InputError('Выберите статус задачи.');
     const filters = ['t.space_id = ?'];
     const args = [space];
-    if (scope === 'none') filters.push(`(${taskPeriod}) IS NULL`);
+    if (scope === 'none') filters.push('t.period IS NULL');
     else if (scope !== 'all') {
-      filters.push(scope.length === 4 ? `substr((${taskPeriod}), 1, 4) = ?` : `(${taskPeriod}) = ?`);
+      filters.push(scope.length === 4 ? 'substr(t.period, 1, 4) = ?' : 't.period = ?');
       args.push(scope);
     }
     if (status !== 'all') {
