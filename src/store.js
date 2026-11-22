@@ -219,13 +219,16 @@ export class Store {
   }
 
   completeVoice(job, titles) {
-    this.transaction(() => {
+    return this.transaction(() => {
       const result = this.db.prepare('UPDATE voice_jobs SET file_id = NULL WHERE id = ? AND file_id IS NOT NULL').run(job.id);
-      if (!result.changes) return;
+      if (!result.changes) return [];
+      const tasks = [];
       for (const [index, title] of [...titles.entries()].reverse()) {
         const source = ['voice', job.chat, job.message, index].join(':');
-        this.#insertTask(job.space, job.user, taskTitle(title), null, source);
+        const id = this.#insertTask(job.space, job.user, taskTitle(title), null, source);
+        tasks.push(this.task(job.space, id));
       }
+      return tasks.reverse();
     });
   }
 

@@ -95,6 +95,16 @@ test('личный и связанный общий чаты использую�
   await click(11, complete);
   assert.equal(store.list(initial.id, { status: 'done' }).length, 1);
   assert.ok(store.list(initial.id, { status: 'done' })[0].completedAt);
+
+  await receive(11, '/task Уточнить время встречи');
+  const newTask = last('sendMessage').reply_markup.inline_keyboard[0];
+  assert.deepEqual(newTask.map(({ text }) => text), ['Выполнить', 'Отменить задачу']);
+  await click(11, newTask[1].callback_data);
+  assert.equal(store.list(initial.id, { status: 'obsolete' })[0].title, 'Уточнить время встречи');
+  const restore = last('editMessageText').reply_markup.inline_keyboard[0][0];
+  assert.equal(restore.text, 'Вернуть в активные');
+  await click(11, restore.callback_data);
+  assert.equal(store.list(initial.id, { status: 'obsolete' }).length, 0);
 });
 
 test('разбор сохраняет точные периоды и отклоняет устаревшие действия', async (t) => {

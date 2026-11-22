@@ -68,12 +68,17 @@ label input, label select { font-size: 1rem; }
 .year-grid small { display: block; color: var(--muted); margin-top: .2rem; }
 .task-list { display: grid; gap: .55rem; }
 .task-row, .card { border: 1px solid var(--line); background: var(--surface); border-radius: .85rem; }
-.task-row { display: flex; align-items: stretch; gap: .3rem; padding: .2rem; }
-.task-row button { border: 0; background: transparent; }
-.task-row button:hover { background: var(--accent-light); }
+.task-row { display: flex; align-items: center; gap: .45rem; padding: .35rem; }
 .task-open { flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere; font-weight: 620; }
+.task-row .task-open { border-color: transparent; background: transparent; }
+.task-row .task-open:hover { background: var(--accent-light); }
 .task-open small { color: var(--muted); display: block; font-weight: 400; margin-top: .2rem; }
-.task-row .task-toggle { min-width: 2.7rem; color: var(--accent); font-size: 1.1rem; }
+.task-status { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; margin-top: .8rem; }
+.status-label { color: var(--muted); border: 1px solid var(--line); border-radius: 1rem; padding: .3rem .55rem; font-size: .875rem; }
+.task-status-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+.task-status-actions button { font-size: .875rem; padding-inline: .6rem; }
+.task-status-actions [data-status-action="done"] { background: var(--accent-light); color: var(--accent); }
+.task-status-actions [data-status-action="obsolete"] { color: var(--warn); }
 .card { margin-top: .8rem; padding: 1rem; }
 .editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
 .wide { grid-column: 1 / -1; }
@@ -86,4 +91,9 @@ label input, label select { font-size: 1rem; }
 #subtasks { margin-top: 1.35rem; }
 #subtasks .task-list { margin-top: .6rem; }
 #settings-view .card button, #settings-view .card a { margin-top: .6rem; }
+@media (max-width: 480px) {
+  .task-row { display: block; padding: .25rem .35rem .55rem; }
+  .task-open { width: 100%; }
+  .task-row .task-status-actions { padding: .15rem .45rem 0; }
+}
 @media (max-width: 345px) { .editor { grid-template-columns: minmax(0, 1fr); } }

@@ -59,9 +59,12 @@
         <button id="task-back" class="quiet back" type="button">‹ К списку</button>
         <h1 id="task-heading">Задача</h1>
         <p id="task-details"></p>
+        <div class="task-status">
+          <span id="task-status-label" class="status-label"></span>
+          <div id="task-status-actions" class="task-status-actions"></div>
+        </div>
         <form id="task-editor" class="card editor">
           <label class="wide">Название<input id="edit-title" maxlength="200" required></label>
-          <label>Статус<select id="edit-status"><option value="active">Активна</option><option value="done">Выполнена</option><option value="obsolete">Неактуальна</option></select></label>
           <label>Месяц<input id="edit-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
           <label>Категория<input id="edit-category" list="category-suggestions" maxlength="60"></label>
           <datalist id="category-suggestions"></datalist>
@@ -88,8 +91,8 @@
           <p id="review-task-info"></p>
           <div class="actions">
             <button data-review="move" type="button">Перенести</button>
-            <button data-review="obsolete" type="button">Неактуально</button>
-            <button class="primary" data-review="done" type="button">Выполнено</button>
+            <button data-review="obsolete" type="button">Отменить задачу</button>
+            <button class="primary" data-review="done" type="button">Выполнить</button>
             <button class="quiet" data-review="skip" type="button">Оставить</button>
           </div>
           <form id="review-move" class="quick-add" hidden>

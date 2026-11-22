@@ -63,6 +63,7 @@ test('личное голосовое приходит в общий бэкло�
   const [reply] = await notification;
   assert.equal(reply.reply_parameters.message_id, 21);
   assert.match(reply.text, /Купить молоко\n• Оплатить интернет/);
+  assert.deepEqual(reply.reply_markup.inline_keyboard.map(([{ text }]) => text), ['Купить молоко', 'Оплатить интернет']);
   await bot.handle(privateVoice);
   assert.equal(downloads, 1);
   assert.equal(store.pendingVoice(), undefined);

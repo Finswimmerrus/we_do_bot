@@ -7,6 +7,11 @@ import { maxVoiceBytes, maxVoiceSeconds, tasksFromSpeech } from './voice.js';
 const pageSize = 6;
 const reviewLifetime = 30 * 60 * 1000;
 const symbols = { active: '○', done: '✓', obsolete: '–' };
+const statusActions = {
+  active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
+  done: { label: 'Выполнить', notice: 'Задача выполнена.' },
+  obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Она в списке «Неактуальные».' },
+};
 const commands = {
   start: 'Открыть пространство пары',
   task: 'Добавить задачу',
@@ -74,6 +79,12 @@ export class TelegramApi {
 
 function button(text, callback) {
   return { text, callback_data: callback };
+}
+
+function taskActionButtons(task, context) {
+  return Object.entries(statusActions)
+    .filter(([status]) => status !== task.status)
+    .map(([status, { label }]) => button(label, `s:${context}:${task.id}:${task.version}:${status}`));
 }
 
 function markup(rows) {
@@ -244,9 +255,16 @@ export class Bot {
       reply = error instanceof InputError ? error.message : 'Не получилось распознать голосовое. Попробуйте отправить его ещё раз.';
     }
     if (signal.aborted) return;
-    this.store.completeVoice(job, titles);
+    const tasks = this.store.completeVoice(job, titles);
+    const context = 'all:active:0';
+    const rows = tasks.map((task) => [
+      button(tasks.length === 1 ? 'Открыть задачу' : brief(task, 45), `t:${context}:${task.id}`),
+    ]);
+    if (tasks.length === 1) rows.unshift(taskActionButtons(tasks[0], context));
+    if (tasks.length > 1) reply += '\n\nЧтобы выполнить или отменить задачу, нажмите на её название.';
     await this.api.call('sendMessage', {
       chat_id: job.chat, text: reply,
+      reply_markup: rows.length ? markup(rows) : undefined,
       reply_parameters: { message_id: job.message, allow_sending_without_reply: true },
     }, AbortSignal.any([signal, AbortSignal.timeout(10_000)])).catch(() => {
       if (!signal.aborted) console.error('Не удалось отправить результат распознавания.');
@@ -326,6 +344,7 @@ export class Bot {
     const space = ctx.space.id;
     const task = this.store.createTask(space, ctx.user, { title }, `${ctx.message.chat.id}:${ctx.message.message_id}`);
     return this.send(ctx.message, `Добавлено: ${task.title}`, markup([
+      taskActionButtons(task, 'all:active:0'),
       [button('Открыть задачу', `t:all:active:0:${task.id}`), button('Бэклог', 'l:all:active:0')],
     ]));
   }
@@ -340,6 +359,9 @@ export class Bot {
     if (scope.length === 7) lines.push(statsLine(taskStats(this.store.list(ctx.space.id, { scope }))));
     lines.push(visible.length ? visible.map((task) => `${symbols[task.status]} ${brief(task)}`).join('\n') : 'В этом списке пока нет задач.');
     if (endPage) lines.push(`Страница ${current + 1} из ${endPage + 1}`);
+    if (visible.some((task) => task.status === 'active')) {
+      lines.push('Нажмите на название задачи, чтобы выполнить или отменить её.');
+    }
     const rows = visible.map((task) =>
       [button(`${symbols[task.status]} ${brief(task, 45)}`, `t:${scope}:${status}:${current}:${task.id}`)]);
     rows.push([
@@ -385,7 +407,6 @@ export class Bot {
 
   async showTask(ctx, task, scope, status, page) {
     const children = taskStats(this.store.children(ctx.space.id, task.id));
-    const state = task.status === 'active' ? 'done' : 'active';
     const context = `${scope}:${status}:${page}`;
     const lines = [task.title, `${statuses[task.status]} · ${labelPeriod(task.period)}`];
     if (task.parentTitle) lines.push(`Подзадача к «${task.parentTitle}»`);
@@ -398,8 +419,7 @@ export class Bot {
     if (task.category) lines.push(task.category);
     if (task.tags.length) lines.push(task.tags.join(', '));
     return this.show(ctx, lines.join('\n'), [
-      [button(state === 'done' ? '✓ Выполнено' : 'Вернуть в активные',
-        `s:${context}:${task.id}:${task.version}:${state}`)],
+      taskActionButtons(task, context),
       this.appButton(ctx.message),
       [button('‹ К списку', `l:${context}`)],
     ]);
@@ -451,8 +471,8 @@ export class Bot {
     }
     return this.show(ctx, text, [
       [button('Перенести', `${prefix}:pick:${shiftMonth(task.period, 1) ?? task.period}`),
-        button('Неактуально', `${prefix}:obsolete`)],
-      [button('Выполнено', `${prefix}:done`), button('Оставить', `${prefix}:skip`)],
+        button(statusActions.obsolete.label, `${prefix}:obsolete`)],
+      [button(statusActions.done.label, `${prefix}:done`), button('Оставить', `${prefix}:skip`)],
     ]);
   }
 
@@ -480,7 +500,7 @@ export class Bot {
     }
     review.ids.shift();
     await this.showReview(ctx, key);
-    return 'Готово';
+    return statusActions[action]?.notice ?? 'Готово';
   }
 
   async onButton(ctx, data) {
@@ -503,7 +523,7 @@ export class Bot {
           return 'Задача уже изменилась.';
         }
         await this.showTask(ctx, task, scope, status, page);
-        return 'Статус обновлён.';
+        return statusActions[task.status].notice;
       }
       default: throw new InputError('Действие недоступно.');
     }

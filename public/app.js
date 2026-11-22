@@ -8,7 +8,11 @@ const ui = {
   task: null, review: null, session: null,
 };
 const statusNames = { active: 'Активна', done: 'Выполнена', obsolete: 'Неактуальна' };
-const symbols = { active: '○', done: '✓', obsolete: '–' };
+const statusActions = {
+  active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
+  done: { label: 'Выполнить', notice: 'Задача выполнена.' },
+  obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Её можно найти в списке «Неактуальные».' },
+};
 
 function element(tag, text, className = '') {
   const node = document.createElement(tag);
@@ -115,22 +119,58 @@ function taskRow(task) {
   fields.push(...task.tags);
   open.append(element('small', fields.join(' · ')));
   open.addEventListener('click', () => run(() => openTask(task.id), open));
-  const toggle = element('button', symbols[task.status], 'task-toggle');
-  toggle.type = 'button';
-  toggle.setAttribute('aria-label', `${task.status === 'active' ? 'Выполнить' : 'Вернуть в активные'}: ${task.title}`);
-  toggle.addEventListener('click', () => run(async () => {
-    const status = task.status === 'active' ? 'done' : 'active';
-    try {
-      await api(`tasks/${task.id}`, { version: task.version, status }, 'PATCH');
-    } catch (error) {
-      if (error.status === 409) await refreshVisibleTasks();
-      throw error;
-    }
-    await refreshVisibleTasks();
-    notify('Статус обновлён.');
-  }, toggle));
-  row.append(open, toggle);
+  const actions = element('div', undefined, 'task-status-actions');
+  renderStatusActions(actions, task);
+  row.append(open, actions);
   return row;
+}
+
+function renderStatusActions(container, task, card = false) {
+  const available = card ? Object.keys(statusActions).filter((status) => status !== task.status)
+    : task.status === 'active' ? ['done', 'obsolete'] : ['active'];
+  const controls = available.map((status) => {
+    const { label } = statusActions[status];
+    const button = element('button', label);
+    button.type = 'button';
+    button.dataset.statusAction = status;
+    if (!card) button.setAttribute('aria-label', `${label}: ${task.title}`);
+    button.addEventListener('click', () => run(async () => {
+      controls.forEach((control) => { control.disabled = true; });
+      try {
+        await changeStatus(task, status);
+      } finally {
+        controls.forEach((control) => { control.disabled = false; });
+      }
+    }, button));
+    return button;
+  });
+  container.replaceChildren(...controls);
+}
+
+function showTaskStatus(task) {
+  $('task-status-label').textContent = statusNames[task.status];
+  renderStatusActions($('task-status-actions'), task, true);
+}
+
+async function changeStatus(current, status) {
+  const cardIsOpen = () => ui.panel === 'task' && ui.task.id === current.id;
+  let updated;
+  try {
+    ({ task: updated } = await api(`tasks/${current.id}`, { version: current.version, status }, 'PATCH'));
+  } catch (error) {
+    if (error.status === 409) {
+      if (cardIsOpen()) await openTask(current.id);
+      else await refreshVisibleTasks();
+    }
+    throw error;
+  }
+  if (cardIsOpen()) {
+    ui.task = updated;
+    showTaskStatus(updated);
+  } else {
+    await refreshVisibleTasks();
+  }
+  notify(statusActions[status].notice);
 }
 
 async function refreshVisibleTasks() {
@@ -205,8 +245,8 @@ async function openTask(id) {
   ui.task = task;
   $('task-heading').textContent = task.title;
   $('task-details').textContent = task.parentTitle ? `Подзадача к «${task.parentTitle}»` : '';
+  showTaskStatus(task);
   $('edit-title').value = task.title;
-  $('edit-status').value = task.status;
   $('edit-period').value = task.period || '';
   $('edit-category').value = task.category || '';
   $('edit-tags').value = task.tags.join(', ');
@@ -226,7 +266,6 @@ async function updateTask() {
   const patch = {
     version: task.version,
     title: $('edit-title').value,
-    status: $('edit-status').value,
     period: $('edit-period').value || null,
     category: $('edit-category').value || null,
     tags: $('edit-tags').value.split(',').map((tag) => tag.trim()).filter(Boolean),
@@ -287,6 +326,7 @@ async function reviewAction(change) {
     review.ids.shift();
     const { tasks } = await current();
     if (ui.review === review) renderReview(tasks);
+    if (change?.status) notify(statusActions[change.status].notice);
   } finally {
     review.busy = false;
   }
