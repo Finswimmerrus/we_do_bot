@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вместе — задачи пары</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <span class="wordmark"><span class="mark" aria-hidden="true">✓</span> Вместе</span>
+      <button id="settings" class="quiet" type="button" hidden>Пространство</button>
+    </header>
+    <p id="notice" role="status" hidden></p>
+    <section id="entry" aria-live="polite"><p>Загружаем задачи…</p></section>
+    <div id="workspace" hidden>
+      <nav aria-label="Разделы" class="tabs">
+        <button type="button" data-view="backlog">Бэклог</button>
+        <button type="button" data-view="periods">Периоды</button>
+      </nav>
+      <section id="list-view">
+        <div class="heading">
+          <h1 id="view-title">Бэклог</h1>
+          <button id="review-start" type="button" hidden>Разобрать</button>
+        </div>
+        <form id="quick-add" class="quick-add">
+          <input id="new-title" placeholder="Новая задача" aria-label="Название новой задачи" maxlength="200" required>
+          <button class="primary" type="submit">Добавить</button>
+        </form>
+        <div class="filters">
+          <label id="period-mode-label" hidden>Период
+            <select id="period-mode"><option value="month">Месяц</option><option value="year">Год</option></select>
+          </label>
+          <label id="backlog-scope-label">Период
+            <select id="backlog-scope"><option value="all">Все месяцы</option><option value="none">Без месяца</option><option value="month">Выбрать месяц</option></select>
+          </label>
+          <label id="scope-month-label" hidden>Месяц
+            <input id="scope-month" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])">
+          </label>
+          <label id="scope-year-label" hidden>Год
+            <input id="scope-year" type="number" min="1000" max="9999">
+          </label>
+          <label>Статус
+            <select id="filter-status"><option value="active">Активные</option><option value="done">Выполненные</option><option value="obsolete">Неактуальные</option><option value="all">Все статусы</option></select>
+          </label>
+          <label>Поиск<input id="filter-query" type="search" placeholder="Название"></label>
+          <label>Категория<select id="filter-category"><option value="">Все</option></select></label>
+          <label>Тег<select id="filter-tag"><option value="">Все</option></select></label>
+        </div>
+        <div id="stats" class="stats" hidden></div>
+        <div id="year-grid" class="year-grid" hidden></div>
+        <p id="list-empty" class="empty" hidden></p>
+        <div id="task-list" class="task-list" aria-live="polite"></div>
+      </section>
+      <section id="task-view" hidden>
+        <button id="task-back" class="quiet back" type="button">‹ К списку</button>
+        <h1 id="task-heading">Задача</h1>
+        <p id="task-details"></p>
+        <form id="task-editor" class="card editor">
+          <label class="wide">Название<input id="edit-title" maxlength="200" required></label>
+          <label>Статус<select id="edit-status"><option value="active">Активна</option><option value="done">Выполнена</option><option value="obsolete">Неактуальна</option></select></label>
+          <label>Месяц<input id="edit-period" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])"></label>
+          <label>Категория<input id="edit-category" list="category-suggestions" maxlength="60"></label>
+          <datalist id="category-suggestions"></datalist>
+          <label>Теги через запятую<input id="edit-tags" maxlength="820"></label>
+          <label class="wide">Родитель<select id="edit-parent"></select></label>
+          <div class="wide actions"><button class="primary" type="submit">Сохранить</button></div>
+        </form>
+        <div id="subtasks">
+          <h2>Подзадачи</h2>
+          <p id="subtask-progress"></p>
+          <div id="child-list" class="task-list"></div>
+          <form id="add-child" class="quick-add">
+            <input id="child-title" placeholder="Новая подзадача" aria-label="Название подзадачи" maxlength="200" required>
+            <button type="submit">Добавить</button>
+          </form>
+        </div>
+      </section>
+      <section id="review-view" hidden>
+        <button id="review-back" class="quiet back" type="button">‹ К периоду</button>
+        <h1 id="review-heading">Разбор</h1>
+        <p id="review-progress"></p>
+        <div id="review-card" class="card" hidden>
+          <h2 id="review-task-title"></h2>
+          <p id="review-task-info"></p>
+          <div class="actions">
+            <button data-review="move" type="button">Перенести</button>
+            <button data-review="obsolete" type="button">Неактуально</button>
+            <button class="primary" data-review="done" type="button">Выполнено</button>
+            <button class="quiet" data-review="skip" type="button">Оставить</button>
+          </div>
+          <form id="review-move" class="quick-add" hidden>
+            <input id="review-month" type="month" aria-label="Новый месяц" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])" required>
+            <button class="primary" type="submit">Перенести</button>
+            <button id="review-clear" type="button">Убрать месяц</button>
+          </form>
+        </div>
+      </section>
+      <section id="settings-view" hidden>
+        <button id="settings-back" class="quiet back" type="button">‹ Назад</button>
+        <h1>Пространство пары</h1>
+        <div class="card">
+          <h2>Партнёр</h2>
+          <p id="partner-info"></p>
+          <a id="invite-link" hidden>Открыть ссылку</a>
+          <button id="copy-invite" type="button" hidden>Скопировать ссылку</button>
+        </div>
+        <div class="card">
+          <h2>Общий чат</h2>
+          <p id="group-info"></p>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
