@@ -88,6 +88,10 @@
           <label class="wide">Родитель<select id="edit-parent"></select></label>
           <div class="wide actions"><button class="primary" type="submit">Сохранить</button></div>
         </form>
+        <div id="subtask-tools" class="actions" hidden>
+          <button id="detach-subtask" type="button">Сделать самостоятельной</button>
+          <button id="delete-subtask" class="danger" type="button">Удалить подзадачу</button>
+        </div>
         <div id="subtasks">
           <h2>Подзадачи</h2>
           <p id="subtask-progress"></p>
@@ -174,6 +178,27 @@
     <h2 id="category-icon-title">Иконка категории</h2>
     <div id="category-icon-options" class="category-icon-grid"></div>
     <form method="dialog"><button class="quiet" type="submit">Закрыть</button></form>
+  </dialog>
+  <dialog id="complete-parent-dialog" aria-labelledby="complete-parent-title">
+    <form method="dialog">
+      <h2 id="complete-parent-title">Остались активные подзадачи</h2>
+      <p id="complete-parent-note"></p>
+      <div class="actions">
+        <button value="children" autofocus>К подзадачам</button>
+        <button class="primary" value="complete">Завершить всё равно</button>
+        <button class="quiet" value="back">Назад</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="delete-subtask-dialog" aria-labelledby="delete-subtask-title">
+    <form method="dialog">
+      <h2 id="delete-subtask-title">Удалить подзадачу?</h2>
+      <p id="delete-subtask-note"></p>
+      <div class="actions">
+        <button value="back" autofocus>Назад</button>
+        <button class="danger" value="delete">Удалить</button>
+      </div>
+    </form>
   </dialog>
 </body>
 </html>

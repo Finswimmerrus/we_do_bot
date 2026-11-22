@@ -42,7 +42,9 @@ export class TelegramApi {
       });
       result = await response.json();
     } catch {
-      throw new Error(`Ошибка соединения с Telegram при вызове ${method}.`);
+      const error = new Error(`Ошибка соединения с Telegram при вызове ${method}.`);
+      error.retryable = true;
+      throw error;
     }
     if (!result.ok) {
       const error = new Error(`Telegram: ${method}, код ${result.error_code} — ${result.description}`
@@ -105,6 +107,10 @@ function strike(text, offset = 0) {
   return { type: 'strikethrough', offset, length: text.length };
 }
 
+function activeSubtaskWarning(count) {
+  return `Активных подзадач: ${count}. Можно завершить их или оставить открытыми. Чтобы сделать подзадачу самостоятельной или удалить её, откройте её карточку в Mini App.`;
+}
+
 function matches(task, scope) {
   return task.status === 'active' && Boolean(task.period?.startsWith(scope));
 }
@@ -120,7 +126,6 @@ function readCommand(message, username) {
 export class Bot {
   constructor({ api, store, username, appUrl, timeZone, transcribe, now = () => new Date() }) {
     Object.assign(this, { api, store, username, appUrl, timeZone, transcribe, now });
-    this.pending = new Map();
     this.reviews = new Map();
   }
 
@@ -172,14 +177,19 @@ export class Bot {
       if (callback) await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
       return;
     }
-    if (message.migrate_to_chat_id) this.store.migrateGroup(message.chat.id, message.migrate_to_chat_id);
-    if (message.migrate_from_chat_id) this.store.migrateGroup(message.migrate_from_chat_id, message.chat.id);
+    if (message.migrate_to_chat_id || message.migrate_from_chat_id) {
+      this.store.applyTelegramAction(update.update_id, () => {
+        if (message.migrate_to_chat_id) this.store.migrateGroup(message.chat.id, message.migrate_to_chat_id);
+        else this.store.migrateGroup(message.migrate_from_chat_id, message.chat.id);
+      });
+    }
     if (!user || user.is_bot) return;
 
-    for (const cache of [this.pending, this.reviews]) {
-      for (const [id, value] of cache) if (value.expires <= Date.now()) cache.delete(id);
-    }
-    const ctx = { callback, message, user: user.id, private: message.chat.type === 'private', space: this.store.spaceFor(user.id) };
+    for (const [id, review] of this.reviews) if (review.expires <= Date.now()) this.reviews.delete(id);
+    const ctx = {
+      callback, message, user: user.id, private: message.chat.type === 'private',
+      space: this.store.spaceFor(user.id), updateId: update.update_id,
+    };
     if (callback) {
       let notice;
       try {
@@ -190,7 +200,7 @@ export class Bot {
         notice = error.message;
       } finally {
         await this.api.call('answerCallbackQuery', { callback_query_id: callback.id, text: notice?.slice(0, 200) })
-          .catch((error) => { if (error.code !== 400) throw error; });
+          .catch((error) => { if (error.code !== 400) console.error(error.message); });
       }
       return;
     }
@@ -207,22 +217,24 @@ export class Bot {
     if (typeof message.text !== 'string') return;
 
     const command = readCommand(message, this.username);
-    const key = `${message.chat.id}:${ctx.user}`;
-    const prompt = this.pending.get(key);
+    const prompt = this.store.taskPrompt(message.chat.id, ctx.user);
     const isReply = prompt && message.reply_to_message?.message_id === prompt.messageId;
-    if (!command && !isReply) return;
+    if (!command && !isReply && !this.store.hasTelegramAction(ctx.updateId)) return;
 
     try {
       if (command) await this.onCommand(ctx, command.name, command.args);
       else {
         this.requireAccess(ctx);
-        await this.addTask(ctx, message.text);
-        this.pending.delete(key);
+        await this.addTask(ctx, message.text, true);
       }
     } catch (error) {
       if (!(error instanceof InputError)) throw error;
       await this.send(message, error.message);
     }
+  }
+
+  applyAction(ctx, action) {
+    return this.store.applyTelegramAction(ctx.updateId, action);
   }
 
   queueVoice(ctx) {
@@ -233,7 +245,7 @@ export class Bot {
     if (voice.file_size > maxVoiceBytes) {
       throw new InputError('Запись слишком большая. Отправьте её двумя частями.');
     }
-    this.store.queueVoice(ctx.space.id, ctx.user, chat.id, messageId, voice.file_id);
+    this.applyAction(ctx, () => this.store.queueVoice(ctx.space.id, ctx.user, chat.id, messageId, voice.file_id));
   }
 
   async processVoices(signal) {
@@ -286,7 +298,19 @@ export class Bot {
     if (!Object.hasOwn(commands, name)) return;
     const { message, user } = ctx;
     if (name === 'start' && ctx.private) {
-      ctx.space = this.store.joinOrCreate(user, args === 'app' ? '' : args);
+      ctx.space = this.applyAction(ctx, () => this.store.joinOrCreate(user, args === 'app' ? '' : args));
+      if (ctx.space.pendingJoin) {
+        const { token, taskCount } = ctx.space.pendingJoin;
+        const lines = [
+          'Присоединиться к пространству партнёра?',
+          `Задачи из вашего пространства (${taskCount}) и категории станут общими. Ваше прежнее приглашение перестанет действовать.`,
+        ];
+        if (ctx.space.groupChat !== null) lines.push('Ваш прежний общий чат будет отключён.');
+        return this.show(ctx, lines.join('\n\n'), [
+          [button('Перенести задачи и присоединиться', `join:${token}:${ctx.space.id}`)],
+          [button('Остаться в своём пространстве', 'stay')],
+        ]);
+      }
       const text = ctx.space.invite
         ? `Ваше пространство готово. Пригласите партнёра по ссылке:\n${this.inviteUrl(ctx)}`
         : 'Общее пространство пары';
@@ -302,17 +326,17 @@ export class Bot {
     if (name === 'link') {
       if (ctx.private) return this.send(message, 'Добавьте бота в общий чат пары и отправьте там /link.');
       if (!ctx.space) throw new InputError('Сначала откройте пространство командой /start в личном чате.');
-      this.store.linkGroup(ctx.space.id, message.chat.id);
+      this.applyAction(ctx, () => this.store.linkGroup(ctx.space.id, message.chat.id));
       return this.send(message, 'Общий чат подключён. Ответы бота видны участникам этого чата.');
     }
-    this.requireAccess(ctx);
+    if (name !== 'unlink' || !this.store.hasTelegramAction(ctx.updateId)) this.requireAccess(ctx);
     switch (name) {
       case 'start': return this.show(ctx, 'Общее пространство пары', this.homeRows(message));
       case 'invite':
         if (!ctx.private) return this.send(message, 'Ссылка-приглашение доступна в личном чате.');
         return this.send(message, ctx.space.invite ? this.inviteUrl(ctx) : 'Партнёр уже присоединился.');
       case 'unlink':
-        this.store.unlinkGroup(ctx.space.id);
+        this.applyAction(ctx, () => this.store.unlinkGroup(ctx.space.id));
         return this.send(message, 'Общий чат отключён.');
       case 'task': return args ? this.addTask(ctx, args) : this.promptForTask(ctx);
       case 'backlog': {
@@ -335,19 +359,22 @@ export class Bot {
   }
 
   async promptForTask(ctx) {
+    if (this.store.hasTelegramAction(ctx.updateId)) return;
     const sent = await this.send(ctx.message, 'Ответьте на это сообщение названием задачи.', {
       force_reply: true,
       input_field_placeholder: 'Название задачи',
     });
-    this.pending.set(`${ctx.message.chat.id}:${ctx.user}`, {
-      messageId: sent.message_id,
-      expires: Date.now() + reviewLifetime,
-    });
+    this.applyAction(ctx, () => this.store.setTaskPrompt(
+      ctx.message.chat.id, ctx.user, sent.message_id, Date.now() + reviewLifetime));
   }
 
-  async addTask(ctx, title) {
+  async addTask(ctx, title, fromPrompt = false) {
     const space = ctx.space.id;
-    const task = this.store.createTask(space, ctx.user, { title }, `${ctx.message.chat.id}:${ctx.message.message_id}`);
+    const task = this.applyAction(ctx, () => {
+      const created = this.store.createTask(space, ctx.user, { title }, `${ctx.message.chat.id}:${ctx.message.message_id}`);
+      if (fromPrompt) this.store.clearTaskPrompt(ctx.message.chat.id, ctx.user);
+      return created;
+    });
     return this.send(ctx.message, `Добавлено: ${task.title}`, markup([
       taskActionButtons(task, 'all:active:0'),
       [button('Открыть задачу', `t:all:active:0:${task.id}`), button('Бэклог', 'l:all:active:0')],
@@ -437,9 +464,20 @@ export class Bot {
     }
     return this.show(ctx, lines.join('\n'), [
       taskActionButtons(task, context),
+      children.total ? [button('Подзадачи', `k:${context}:${task.id}`)] : [],
       this.appButton(ctx.message),
       [button('‹ К списку', `l:${context}`)],
     ], task.status === 'done' ? [strike(task.title)] : []);
+  }
+
+  async showChildren(ctx, id, context) {
+    const parent = this.store.task(ctx.space.id, id);
+    const children = this.store.children(ctx.space.id, id);
+    return this.show(ctx, `Подзадачи · ${parent.title}`, [
+      ...children.slice(0, 40).map((child) => [button(brief(child, 45), `t:${context}:${child.id}`)]),
+      this.appButton(ctx.message),
+      [button('‹ К родительской задаче', `t:${context}:${parent.id}`)],
+    ]);
   }
 
   startReview(ctx, scope) {
@@ -467,11 +505,12 @@ export class Bot {
     const scopeName = review.scope.length === 4 ? review.scope : labelPeriod(review.scope);
     const task = this.reviewTask(review);
     if (!task) {
-      this.reviews.delete(key);
-      return this.show(ctx, `Разбор · ${scopeName}\n\nВ этом проходе задач больше нет.`, [
+      await this.show(ctx, `Разбор · ${scopeName}\n\nВ этом проходе задач больше нет.`, [
         [button('Повторить разбор', `r:${review.scope}`)],
         this.appButton(ctx.message),
       ]);
+      this.reviews.delete(key);
+      return;
     }
     const text = `Разбор · ${scopeName}\n\n${brief(task, 350)}\nОсталось в этом проходе: ${review.ids.length}`;
     const prefix = `a:${key}:${task.id}:${task.version}`;
@@ -509,9 +548,21 @@ export class Bot {
     if (action === 'move') {
       const period = target === 'none' ? null : exactPeriod(target);
       if (period === task.period) throw new InputError('Выберите другой месяц или оставьте задачу.');
-      this.store.updateTask(review.space, task.id, { version: task.version, period });
+      this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, { version: task.version, period }));
     } else if (action === 'done' || action === 'obsolete') {
-      this.store.updateTask(review.space, task.id, { version: task.version, status: action });
+      try {
+        this.applyAction(ctx, () => this.store.updateTask(review.space, task.id, {
+          version: task.version, status: action, confirmWithActiveSubtasks: target === 'yes',
+        }));
+      } catch (error) {
+        if (!error.activeSubtasks) throw error;
+        const prefix = `a:${key}:${task.id}:${version}`;
+        await this.show(ctx, `${task.title}\n\n${activeSubtaskWarning(error.activeSubtasks)}`, [
+          [button('Завершить всё равно', `${prefix}:done:yes`)],
+          [button('К подзадачам', `k:all:active:0:${task.id}`), button('‹ К разбору', `${prefix}:back`)],
+        ]);
+        return;
+      }
     } else if (action !== 'skip') {
       throw new InputError('Действие недоступно.');
     }
@@ -525,21 +576,47 @@ export class Bot {
     const [scope, status, page, id, version, state] = parts;
     switch (action) {
       case 'add': await this.promptForTask(ctx); return;
+      case 'join': {
+        const source = Number(status);
+        if (!ctx.private || !/^[A-Za-z0-9_-]{24}$/.test(scope) || !Number.isSafeInteger(source) || source < 1) {
+          throw new InputError('Откройте приглашение ещё раз в личном чате с ботом.');
+        }
+        ctx.space = this.applyAction(ctx, () => this.store.joinOrCreate(ctx.user, scope, source));
+        await this.show(ctx, 'Вы присоединились к партнёру. Ваши задачи теперь в общем бэклоге.', this.homeRows(ctx.message));
+        return;
+      }
+      case 'stay': {
+        if (!ctx.private) throw new InputError('Откройте личный чат с ботом.');
+        await this.show(ctx, 'Вы остались в своём пространстве.', this.homeRows(ctx.message));
+        return;
+      }
       case 'l': await this.showList(ctx, scope, status, Number(page)); return;
       case 'y': await this.showYear(ctx, scope); return;
       case 'r': await this.startReview(ctx, scope); return;
       case 'a': return this.reviewAction(ctx, parts);
       case 't': await this.showTask(ctx, this.store.task(ctx.space.id, Number(id)), scope, status, page); return;
+      case 'k': await this.showChildren(ctx, Number(id), `${scope}:${status}:${page}`); return;
       case 's': {
         let task;
         try {
-          task = this.store.updateTask(ctx.space.id, Number(id), { version: Number(version), status: state });
+          task = this.applyAction(ctx, () => this.store.updateTask(ctx.space.id, Number(id), {
+            version: Number(version), status: state, confirmWithActiveSubtasks: parts[6] === 'yes',
+          }));
         } catch (error) {
+          if (error.activeSubtasks) {
+            const context = `${scope}:${status}:${page}`;
+            const parent = this.store.task(ctx.space.id, Number(id));
+            await this.show(ctx, `${parent.title}\n\n${activeSubtaskWarning(error.activeSubtasks)}`, [
+              [button('Завершить всё равно', `s:${context}:${id}:${version}:done:yes`)],
+              [button('К подзадачам', `k:${context}:${id}`), button('‹ Назад', `t:${context}:${id}`)],
+            ]);
+            return;
+          }
           if (error.status !== 409) throw error;
           await this.showTask(ctx, this.store.task(ctx.space.id, Number(id)), scope, status, page);
           return 'Задача уже изменилась.';
         }
-        await this.showTask(ctx, task, scope, status, page);
+        await this.showTask(ctx, this.store.task(ctx.space.id, task.id), scope, status, page);
         return statusActions[task.status].notice;
       }
       default: throw new InputError('Действие недоступно.');
@@ -547,27 +624,61 @@ export class Bot {
   }
 }
 
-export async function poll(api, bot, signal) {
-  let offset = 0;
+async function processPendingUpdate(api, bot, update, signal, wait) {
+  let attempts = 0;
   while (!signal.aborted) {
     try {
+      await bot.handle(update);
+      bot.store.finishTelegramUpdate(update.update_id);
+      return;
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error.code === 401) throw error;
+      attempts++;
+      const sqliteCode = error.errcode & 0xff;
+      const temporary = error.retryable || error.code === 408 || error.code === 429 || error.code >= 500
+        || sqliteCode === 5 || sqliteCode === 6;
+      const permanent = !temporary && (error.code === 400 || error.code === 403 || attempts >= 3);
+      console.error(`Telegram, обновление ${update.update_id}, попытка ${attempts}:`, error.message);
+      if (permanent) {
+        const message = update.callback_query?.message ?? update.message;
+        if (message && error.code !== 403) {
+          await api.call('sendMessage', {
+            chat_id: message.chat.id, text: 'Не удалось обработать команду. Проверьте изменения в бэклоге.',
+          }, AbortSignal.any([signal, AbortSignal.timeout(10_000)])).catch((failure) => console.error(failure.message));
+        }
+        bot.store.finishTelegramUpdate(update.update_id, true);
+        return;
+      }
+      await wait(error.retryAfter ?? Math.min(2 ** (attempts - 1), 30), signal);
+    }
+  }
+}
+
+export async function poll(api, bot, signal, wait = (seconds, stop) => setTimeout(seconds * 1000, undefined, { signal: stop })) {
+  let offset = 0;
+  let lastReceived = 0;
+  while (!signal.aborted) {
+    try {
+      const pending = bot.store.pendingTelegramUpdate();
+      if (pending) {
+        await processPendingUpdate(api, bot, pending, signal, wait);
+        continue;
+      }
+      if (Date.now() - lastReceived >= 86_400_000) offset = 0;
       const updates = await api.call('getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] },
         AbortSignal.any([signal, AbortSignal.timeout(40_000)]));
-      for (const update of updates) {
-        if (signal.aborted) break;
-        try {
-          await bot.handle(update);
-        } catch (error) {
-          console.error('Обновление Telegram:', error.message);
-        }
-        offset = update.update_id + 1;
+      if (updates.length) {
+        bot.store.saveTelegramUpdates(updates);
+        offset = updates.at(-1).update_id + 1;
+        lastReceived = Date.now();
       }
     } catch (error) {
       if (signal.aborted) break;
       if (error.code === 401) throw error;
       console.error(error.message);
       const seconds = error.retryAfter ?? (error.code === 409 ? 15 : 3);
-      await setTimeout(seconds * 1000, undefined, { signal }).catch((failure) => {
+      await wait(seconds, signal).catch((failure) => {
         if (failure.name !== 'AbortError') throw failure;
       });
     }

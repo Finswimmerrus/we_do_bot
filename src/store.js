@@ -141,6 +141,25 @@ export class Store {
         color TEXT,
         UNIQUE (space_id, kind, name_key)
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS accepted_invites (
+        token TEXT PRIMARY KEY,
+        space_id INTEGER NOT NULL REFERENCES spaces(id)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS telegram_updates (
+        id INTEGER PRIMARY KEY,
+        payload TEXT,
+        action_result TEXT,
+        failed INTEGER NOT NULL DEFAULT 0,
+        received_at INTEGER NOT NULL DEFAULT (unixepoch())
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS telegram_pending_updates ON telegram_updates(id) WHERE payload IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS task_prompts (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, user_id)
+      ) STRICT;
     `);
     this.#migrateSchema();
   }
@@ -150,6 +169,7 @@ export class Store {
   }
 
   transaction(action) {
+    if (this.db.isTransaction) return action();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = action();
@@ -161,6 +181,54 @@ export class Store {
     }
   }
 
+  saveTelegramUpdates(updates) {
+    this.transaction(() => {
+      const save = this.db.prepare('INSERT INTO telegram_updates (id, payload) VALUES (?, ?) ON CONFLICT (id) DO NOTHING');
+      for (const update of updates) save.run(update.update_id, JSON.stringify(update));
+      this.db.prepare('DELETE FROM telegram_updates WHERE payload IS NULL AND received_at < unixepoch() - 172800').run();
+    });
+  }
+
+  pendingTelegramUpdate() {
+    const row = this.db.prepare('SELECT payload FROM telegram_updates WHERE payload IS NOT NULL ORDER BY id LIMIT 1').get();
+    return row ? JSON.parse(row.payload) : null;
+  }
+
+  applyTelegramAction(id, action) {
+    if (id === undefined) return action();
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT action_result AS result FROM telegram_updates WHERE id = ?').get(id);
+      if (!row) return action();
+      if (row.result !== null) return JSON.parse(row.result);
+      const result = action();
+      this.db.prepare('UPDATE telegram_updates SET action_result = ? WHERE id = ?').run(JSON.stringify(result ?? null), id);
+      return result;
+    });
+  }
+
+  finishTelegramUpdate(id, failed = false) {
+    this.db.prepare('UPDATE telegram_updates SET payload = NULL, action_result = NULL, failed = ? WHERE id = ?').run(Number(failed), id);
+  }
+
+  hasTelegramAction(id) {
+    return id !== undefined && Boolean(this.db.prepare('SELECT 1 FROM telegram_updates WHERE id = ? AND action_result IS NOT NULL').get(id));
+  }
+
+  taskPrompt(chat, user) {
+    return this.db.prepare('SELECT message_id AS messageId FROM task_prompts WHERE chat_id = ? AND user_id = ? AND expires_at > ?')
+      .get(chat, user, Date.now());
+  }
+
+  setTaskPrompt(chat, user, message, expires) {
+    this.db.prepare(`INSERT INTO task_prompts VALUES (?, ?, ?, ?)
+      ON CONFLICT (chat_id, user_id) DO UPDATE SET message_id = excluded.message_id, expires_at = excluded.expires_at`)
+      .run(chat, user, message, expires);
+  }
+
+  clearTaskPrompt(chat, user) {
+    this.db.prepare('DELETE FROM task_prompts WHERE chat_id = ? AND user_id = ?').run(chat, user);
+  }
+
   spaceFor(user) {
     const space = this.db.prepare(`
       SELECT s.id, s.invite, s.group_chat AS groupChat,
@@ -170,23 +238,66 @@ export class Store {
     return space ?? null;
   }
 
-  joinOrCreate(user, invite = '') {
+  joinOrCreate(user, invite = '', confirmedSpace = null) {
     return this.transaction(() => {
       const current = this.spaceFor(user);
-      if (current) return current;
-
-      if (invite) {
-        const target = this.db.prepare('SELECT id FROM spaces WHERE invite = ?').get(invite);
-        if (!target) throw new InputError('Приглашение уже использовано или ссылка неверна.');
-        this.db.prepare('INSERT INTO members VALUES (?, ?, 2)').run(user, target.id);
-        this.db.prepare('UPDATE spaces SET invite = NULL WHERE id = ?').run(target.id);
-      } else {
+      if (!invite) {
+        if (current) return current;
         const { lastInsertRowid } = this.db.prepare('INSERT INTO spaces (invite) VALUES (?)')
           .run(randomBytes(18).toString('base64url'));
         this.db.prepare('INSERT INTO members VALUES (?, ?, 1)').run(user, lastInsertRowid);
+        return this.spaceFor(user);
       }
+
+      const target = this.db.prepare('SELECT id FROM spaces WHERE invite = ?').get(invite);
+      if (!target) {
+        const accepted = this.db.prepare('SELECT space_id AS space FROM accepted_invites WHERE token = ?').get(invite);
+        if (accepted && current?.id === accepted.space) return current;
+        throw new InputError('Приглашение уже использовано или ссылка неверна.');
+      }
+      if (current?.id === target.id) return current;
+      if (current?.memberCount === 2) {
+        throw new InputError('Вы уже в пространстве с партнёром. Текущее пространство и задачи сохранены.');
+      }
+      if (current && confirmedSpace === null) {
+        const { count } = this.db.prepare('SELECT COUNT(*) AS count FROM tasks WHERE space_id = ?').get(current.id);
+        return { ...current, pendingJoin: { token: invite, taskCount: count } };
+      }
+      if (confirmedSpace !== null && current?.id !== confirmedSpace) {
+        throw new InputError('Ваше пространство изменилось. Откройте приглашение ещё раз.');
+      }
+      if (current) this.#moveSoloSpace(current.id, target.id, user);
+      else this.db.prepare('INSERT INTO members VALUES (?, ?, 2)').run(user, target.id);
+      this.db.prepare('UPDATE spaces SET invite = NULL WHERE id = ?').run(target.id);
+      this.db.prepare('INSERT INTO accepted_invites (token, space_id) VALUES (?, ?)').run(invite, target.id);
       return this.spaceFor(user);
     });
+  }
+
+  #moveSoloSpace(source, target, user) {
+    const labels = this.catalog(source);
+    const names = { category: new Map(), tag: new Map() };
+    const keepAppearance = this.db.prepare('UPDATE labels SET color = COALESCE(color, ?), icon = COALESCE(icon, ?) WHERE id = ?');
+    for (const label of [...labels.categories, ...labels.tags]) {
+      const destination = this.#registerLabel(target, label.kind, label.name);
+      names[label.kind].set(label.name, destination.name);
+      keepAppearance.run(label.color, label.icon, destination.id);
+    }
+    const tasks = this.db.prepare('SELECT id, category, tags FROM tasks WHERE space_id = ?').all(source);
+    const relabel = this.db.prepare('UPDATE tasks SET category = ?, tags = ? WHERE id = ?');
+    for (const task of tasks) {
+      const category = names.category.get(task.category) ?? task.category;
+      const tags = JSON.parse(task.tags).map((name) => names.tag.get(name) ?? name);
+      relabel.run(category, JSON.stringify(tags), task.id);
+    }
+    this.db.prepare(`UPDATE tasks AS moving SET source = NULL
+      WHERE space_id = ? AND source IS NOT NULL AND EXISTS
+      (SELECT 1 FROM tasks AS existing WHERE existing.space_id = ? AND existing.source = moving.source)`).run(source, target);
+    this.db.prepare('UPDATE tasks SET space_id = ?, version = version + 1 WHERE space_id = ?').run(target, source);
+    this.db.prepare('UPDATE voice_jobs SET space_id = ? WHERE space_id = ?').run(target, source);
+    this.db.prepare('UPDATE members SET space_id = ?, slot = 2 WHERE user_id = ? AND space_id = ?').run(target, user, source);
+    this.db.prepare('DELETE FROM labels WHERE space_id = ?').run(source);
+    this.db.prepare('UPDATE spaces SET invite = NULL, group_chat = NULL WHERE id = ?').run(source);
   }
 
   linkGroup(space, chat) {
@@ -389,15 +500,25 @@ export class Store {
 
   completeVoice(job, titles) {
     return this.transaction(() => {
-      const result = this.db.prepare('UPDATE voice_jobs SET file_id = NULL WHERE id = ? AND file_id IS NOT NULL').run(job.id);
-      if (!result.changes) return [];
+      const { space } = this.db.prepare('SELECT space_id AS space FROM voice_jobs WHERE id = ? AND file_id IS NOT NULL').get(job.id) ?? {};
+      if (space === undefined) return [];
+      this.db.prepare('UPDATE voice_jobs SET file_id = NULL WHERE id = ?').run(job.id);
       const tasks = [];
       for (const [index, title] of [...titles.entries()].reverse()) {
         const source = ['voice', job.chat, job.message, index].join(':');
-        const id = this.#insertTask(job.space, job.user, { title: taskTitle(title), source });
-        tasks.push(this.task(job.space, id));
+        const id = this.#insertTask(space, job.user, { title: taskTitle(title), source });
+        tasks.push(this.task(space, id));
       }
       return tasks.reverse();
+    });
+  }
+
+  deleteSubtask(space, id, version) {
+    this.transaction(() => {
+      const task = this.task(space, id);
+      if (task.version !== version) throw new InputError('Подзадача уже изменилась. Откройте её заново.', 409);
+      if (task.parentId === null) throw new InputError('Удаление доступно только для подзадач.');
+      this.db.prepare('DELETE FROM tasks WHERE id = ? AND space_id = ?').run(id, space);
     });
   }
 
@@ -431,6 +552,15 @@ export class Store {
           throw new InputError('Выберите статус задачи.');
         }
         if (task.status !== patch.status) {
+          if (patch.status === 'done' && patch.confirmWithActiveSubtasks !== true) {
+            const { count } = this.db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE space_id = ? AND parent_id = ? AND status = 'active'")
+              .get(space, id);
+            if (count) {
+              const warning = new InputError('У задачи остались активные подзадачи.', 422);
+              warning.activeSubtasks = count;
+              throw warning;
+            }
+          }
           task.status = patch.status;
           task.completedAt = task.status === 'done' ? new Date().toISOString() : null;
         }

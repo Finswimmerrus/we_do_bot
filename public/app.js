@@ -30,6 +30,7 @@ async function api(path, data, method = 'GET') {
   if (!response.ok) {
     const error = new Error(result.error);
     error.status = response.status;
+    error.activeSubtasks = result.activeSubtasks;
     throw error;
   }
   return result;
@@ -56,6 +57,7 @@ async function run(action, button) {
 }
 
 function show(panel) {
+  if (panel !== 'task') ui.cardRequest++;
   ui.panel = panel;
   for (const name of ['list', 'task', 'review', 'settings', 'labels']) $(`${name}-view`).hidden = name !== panel;
 }
@@ -132,13 +134,13 @@ function showYear(monthStats) {
   }));
 }
 
-function taskRow(task) {
+function taskRow(task, hidePeriod = false) {
   const row = element('div', undefined, 'task-row');
   row.dataset.status = task.status;
   const open = element('button', undefined, 'task-open');
   open.type = 'button';
   open.append(element('span', task.title, 'task-title'));
-  const fields = ui.view === 'periods' && selectedScope().length === 7 ? [] : [periodLabel(task.period)];
+  const fields = hidePeriod ? [] : [periodLabel(task.period)];
   if (task.status === 'obsolete') fields.unshift('Отменена');
   if (task.parentTitle) fields.push(`к «${task.parentTitle}»`);
   if (fields.length) open.append(element('small', fields.join(' · ')));
@@ -194,11 +196,37 @@ function showTaskStatus(task) {
   renderStatusActions($('task-status-actions'), task, true);
 }
 
+function askDialog(id) {
+  const dialog = $(id);
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise((resolve) => dialog.addEventListener('close', () => resolve(dialog.returnValue), { once: true }));
+}
+
+async function patchWithCompletionWarning(task, change) {
+  const patch = (body) => api(`tasks/${task.id}`, { version: task.version, ...body }, 'PATCH');
+  try {
+    return await patch(change);
+  } catch (error) {
+    if (!error.activeSubtasks) throw error;
+    $('complete-parent-note').textContent = `Активных подзадач: ${error.activeSubtasks}. Их можно завершить, сделать самостоятельными или удалить. Если завершить родителя сейчас, подзадачи останутся активными.`;
+    const choice = await askDialog('complete-parent-dialog');
+    if (choice === 'complete') return patch({ ...change, confirmWithActiveSubtasks: true });
+    if (choice === 'children') {
+      await openTask(task.id);
+      if (ui.panel === 'task' && ui.task.id === task.id) $('subtasks').scrollIntoView({ block: 'start' });
+    }
+    return null;
+  }
+}
+
 async function changeStatus(current, status) {
   const cardIsOpen = () => ui.panel === 'task' && ui.task.id === current.id;
   let updated;
   try {
-    ({ task: updated } = await api(`tasks/${current.id}`, { version: current.version, status }, 'PATCH'));
+    const result = await patchWithCompletionWarning(current, { status });
+    if (!result) return;
+    updated = result.task;
   } catch (error) {
     if (error.status === 409) {
       if (cardIsOpen()) await openTask(current.id);
@@ -239,7 +267,7 @@ async function loadList() {
   $('scope-month-label').hidden = periods ? $('period-mode').value === 'year' : $('backlog-scope').value !== 'month';
   $('scope-year-label').hidden = !periods || $('period-mode').value !== 'year';
   for (const filter of document.querySelectorAll('[data-task-filter]')) filter.hidden = statistics;
-  $('quick-add').hidden = periods;
+  $('quick-add').hidden = statistics || periods && scope.length !== 7;
   $('review-start').hidden = !statistics;
   $('view-title').textContent = statistics ? 'Статистика' : periods ? periodLabel(scope) : 'Бэклог';
   $('stats').hidden = !statistics;
@@ -261,9 +289,11 @@ async function loadList() {
     if ($('filter-category').value !== params.get('category')) {
       return await loadList();
     }
-    $('task-list').replaceChildren(...tasks.map(taskRow));
+    const hidePeriod = scope.length === 7;
+    $('task-list').replaceChildren(...tasks.map((task) => taskRow(task, hidePeriod)));
     $('list-empty').hidden = tasks.length > 0;
     $('list-empty').textContent = 'По этим фильтрам задач нет.';
+    return tasks;
   } finally {
     if (seq === ui.listRequest) $('task-list').removeAttribute('aria-busy');
   }
@@ -287,7 +317,7 @@ function showChildren(children) {
   if (available) progress.push(`${counts.done} из ${available} выполнено`, `${counts.active} активно`);
   if (counts.obsolete) progress.push(`${counts.obsolete} неактуально`);
   $('subtask-progress').textContent = progress.join(' · ');
-  $('child-list').replaceChildren(...children.map(taskRow));
+  $('child-list').replaceChildren(...children.map((task) => taskRow(task)));
 }
 
 function toggleCategoryInput(selectId, fieldId, inputId) {
@@ -333,8 +363,11 @@ function prepareChildForm(task) {
 
 async function openTask(id) {
   const request = ++ui.cardRequest;
-  const [{ task, children, catalog }, { tasks }] = await Promise.all([api(`tasks/${id}`), api('tasks')]);
+  const result = await Promise.all([api(`tasks/${id}`), api('tasks')]).catch((error) => {
+    if (request === ui.cardRequest) throw error;
+  });
   if (request !== ui.cardRequest) return;
+  const [{ task, children, catalog }, { tasks }] = result;
   ui.task = task;
   ui.catalog = catalog;
   $('task-heading').textContent = task.title;
@@ -354,6 +387,7 @@ async function openTask(id) {
   $('edit-parent').disabled = children.length > 0;
   updateImportanceChoices();
   $('subtasks').hidden = task.parentId !== null;
+  $('subtask-tools').hidden = task.parentId === null;
   if (task.parentId === null) prepareChildForm(task);
   showChildren(children);
   show('task');
@@ -361,6 +395,7 @@ async function openTask(id) {
 
 async function updateTask() {
   const task = ui.task;
+  const request = ui.cardRequest;
   const patch = {
     version: task.version,
     title: $('edit-title').value,
@@ -372,10 +407,10 @@ async function updateTask() {
   try {
     await api(`tasks/${task.id}`, patch, 'PATCH');
   } catch (error) {
-    if (error.status === 409 || error.status === 404) await openTask(task.id);
+    if ((error.status === 409 || error.status === 404) && request === ui.cardRequest) await openTask(task.id);
     throw error;
   }
-  await openTask(task.id);
+  if (request === ui.cardRequest) await openTask(task.id);
   notify('Изменения сохранены.');
 }
 
@@ -412,7 +447,7 @@ async function reviewAction(change) {
     if (change) {
       if ('period' in change && change.period === review.task.period) throw new Error('Выберите другой месяц или оставьте задачу.');
       try {
-        await api(`tasks/${review.task.id}`, { version: review.task.version, ...change }, 'PATCH');
+        if (!await patchWithCompletionWarning(review.task, change)) return;
       } catch (error) {
         if (error.status === 409) {
           const { tasks } = await current();
@@ -431,6 +466,7 @@ async function reviewAction(change) {
 }
 
 async function openSettings() {
+  ui.cardRequest++;
   const session = await api('session');
   $('partner-info').textContent = session.partnerJoined ? 'Партнёр уже присоединился.' : 'Отправьте ссылку партнёру. Она действует до первого подключения.';
   $('invite-link').hidden = !session.invite;
@@ -538,10 +574,14 @@ function bindUi() {
     event.preventDefault();
     run(async () => {
       const input = $('new-title');
-      await api('tasks', { title: input.value }, 'POST');
+      const scope = selectedScope();
+      const period = scope.length === 7 ? scope : null;
+      const { task } = await api('tasks', { title: input.value, period }, 'POST');
       input.value = '';
-      await loadList();
-      notify('Задача добавлена.');
+      const visible = ui.panel === 'list' && ui.view !== 'statistics' ? await loadList() : null;
+      const location = period ? `Задача добавлена. Месяц — ${periodLabel(period)}.` : 'Задача добавлена.';
+      notify(visible && !visible.some(({ id }) => id === task.id)
+        ? `${location} Текущие фильтры скрывают её.` : location);
     }, event.submitter);
   });
   $('task-back').addEventListener('click', () => run(() => changeView(ui.view)));
@@ -549,6 +589,22 @@ function bindUi() {
     event.preventDefault();
     run(updateTask, event.submitter);
   });
+  $('detach-subtask').addEventListener('click', () => run(async () => {
+    const task = ui.task;
+    const request = ui.cardRequest;
+    await api(`tasks/${task.id}`, { version: task.version, parentId: null }, 'PATCH');
+    if (request === ui.cardRequest) await openTask(task.id);
+    notify('Подзадача стала самостоятельной задачей.');
+  }, $('detach-subtask')));
+  $('delete-subtask').addEventListener('click', () => run(async () => {
+    const task = ui.task;
+    const request = ui.cardRequest;
+    $('delete-subtask-note').textContent = `«${task.title}» будет удалена из общего пространства пары. Удаление окончательное.`;
+    if (await askDialog('delete-subtask-dialog') !== 'delete') return;
+    await api(`tasks/${task.id}`, { version: task.version }, 'DELETE');
+    if (request === ui.cardRequest) await openTask(task.parentId);
+    notify('Подзадача удалена.');
+  }, $('delete-subtask')));
   $('edit-category').addEventListener('change', () => toggleCategoryInput('edit-category', 'new-category-field', 'new-category'));
   $('edit-parent').addEventListener('change', updateImportanceChoices);
   $('child-category').addEventListener('change', () => toggleCategoryInput('child-category', 'child-category-new-field', 'child-category-new'));
@@ -556,11 +612,12 @@ function bindUi() {
     event.preventDefault();
     run(async () => {
       const parentId = ui.task.id;
+      const request = ui.cardRequest;
       const category = $('child-category').value;
       const body = { title: $('child-title').value, parentId, period: $('child-period').value || null };
       if (category !== 'inherit') body.categoryChoice = categoryChoice(category, 'child-category-new');
       await api('tasks', body, 'POST');
-      await openTask(parentId);
+      if (request === ui.cardRequest) await openTask(parentId);
       notify('Подзадача добавлена.');
     }, event.submitter);
   });

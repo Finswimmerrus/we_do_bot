@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { Bot } from '../src/bot.js';
+import { Bot, poll } from '../src/bot.js';
 import { currentPeriod, parseMonth } from '../src/periods.js';
 import { Store, taskStats } from '../src/store.js';
 import { webServer } from '../src/web.js';
@@ -134,6 +134,105 @@ test('разбор сохраняет точные периоды и откло�
   assert.match(last('sendMessage').text, /Купить два билета/);
 });
 
+test('повторное приглашение переносит чужое одиночное пространство только после подтверждения', async (t) => {
+  const { store, receive, click, last } = setup(t);
+  await receive(11, '/start');
+  await receive(22, '/start');
+  const first = store.spaceFor(11);
+  const second = store.spaceFor(22);
+  store.linkGroup(second.id, -100123);
+  const category = store.createLabel(first.id, { kind: 'category', name: 'Дом' });
+  const oldTask = store.createTask(second.id, 22, { title: 'Ремонт', category: 'дом', period: '2026-12' });
+  const child = store.createTask(second.id, 22, { title: 'Купить краску', parentId: oldTask.id });
+  store.queueVoice(second.id, 22, 22, 44, 'queued');
+  const queued = store.pendingVoice();
+  await receive(22, `/start ${first.invite}`);
+  const prompt = last('sendMessage');
+  assert.match(prompt.text, /\(2\)/);
+  assert.match(prompt.text, /общий чат будет отключён/);
+  assert.equal(store.spaceFor(22).id, second.id);
+  await click(22, prompt.reply_markup.inline_keyboard[1][0].callback_data);
+  assert.equal(store.spaceFor(22).id, second.id);
+  await receive(22, `/start ${first.invite}`);
+  const confirm = last('sendMessage').reply_markup.inline_keyboard[0][0].callback_data;
+  await click(22, confirm);
+  assert.equal(store.spaceFor(22).id, first.id);
+  assert.equal(store.task(first.id, child.id).parentId, oldTask.id);
+  assert.equal(store.task(first.id, child.id).category, 'Дом');
+  assert.equal(store.task(first.id, oldTask.id).period, '2026-12');
+  assert.deepEqual(store.catalog(first.id).categories.map(({ id }) => id), [category.id]);
+  store.completeVoice(queued, ['Задача из голоса']);
+  assert.equal(store.list(first.id).length, 3);
+  await click(22, confirm);
+  assert.equal(store.list(first.id).length, 3);
+  await receive(33, `/start ${second.invite}`);
+  assert.equal(store.spaceFor(33), null);
+  await receive(33, '/start');
+  await receive(22, `/start ${store.spaceFor(33).invite}`);
+  assert.match(last('sendMessage').text, /уже в пространстве/);
+  assert.equal(store.spaceFor(22).id, first.id);
+  assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('неподтверждённое обновление сохраняется при перезапуске и не дублирует созданную задачу', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'we-do-telegram-'));
+  const path = join(directory, 'tasks.sqlite');
+  let store = new Store(path);
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true });
+  });
+  const { id: space } = store.joinOrCreate(11);
+  const update = (id, title) => ({
+    update_id: id,
+    message: { message_id: id, chat: { id: 11, type: 'private' }, from: { id: 11 },
+      text: '/task ' + title, entities: [{ type: 'bot_command', offset: 0, length: 5 }] },
+  });
+  const updates = [update(71, 'Первая'), update(72, 'Вторая')];
+  const stopFirst = new AbortController();
+  const first = {
+    async call(method) {
+      if (method === 'getUpdates') return updates;
+      stopFirst.abort();
+      throw new Error('connection lost after task creation');
+    },
+  };
+  const options = { username: 'test_bot', timeZone: 'Europe/Moscow' };
+  await poll(first, new Bot({ ...options, store, api: first }), stopFirst.signal);
+  store.close();
+  store = new Store(path);
+  assert.equal(store.pendingTelegramUpdate().update_id, 71);
+  assert.ok(store.hasTelegramAction(71));
+  assert.equal(store.list(space).length, 1);
+
+  const stopSecond = new AbortController();
+  const notices = [];
+  const offsets = [];
+  const delays = [];
+  let retry = true;
+  const second = {
+    async call(method, body) {
+      if (method === 'getUpdates') {
+        offsets.push(body.offset);
+        if (offsets.length === 1) return updates;
+        stopSecond.abort();
+        return [];
+      }
+      if (retry) {
+        retry = false;
+        throw Object.assign(new Error('rate limited'), { code: 429, retryAfter: 2 });
+      }
+      notices.push(body.text);
+    },
+  };
+  await poll(second, new Bot({ ...options, store, api: second }), stopSecond.signal, async (delay) => delays.push(delay));
+  assert.deepEqual(delays, [2]);
+  assert.deepEqual(offsets, [0, 73]);
+  assert.deepEqual(notices, ['Добавлено: Первая', 'Добавлено: Вторая']);
+  assert.equal(store.pendingTelegramUpdate(), null);
+  assert.equal(store.list(space).length, 2);
+});
+
 test('каталог переносит старые категории и теги и сохраняет его после перезапуска', (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'we-do-labels-'));
   const path = join(directory, 'tasks.sqlite');
@@ -233,7 +332,12 @@ test('Mini App копирует категорию при создании и с
   assert.equal(plannedChild.period, '2026-10');
   assert.equal(plannedChild.category, 'Быт');
   assert.equal(plannedChild.importance, 'high');
-  assert.equal((await patch(plannedParent, { period: '2026-11', category: 'Поездки', status: 'done' })).code, 200);
+  const completion = { period: '2026-11', category: 'Поездки', status: 'done' };
+  const warning = await patch(plannedParent, completion);
+  assert.equal(warning.code, 422);
+  assert.equal(warning.data.activeSubtasks, 1);
+  assert.equal(store.task(store.spaceFor(11).id, parent.id).status, 'active');
+  assert.equal((await patch(plannedParent, { ...completion, confirmWithActiveSubtasks: true })).code, 200);
   assert.equal((await patch(parent, { status: 'obsolete' })).code, 409);
   const { data } = await call('tasks?scope=2026&include=summary');
   assert.equal(data.monthStats['2026-10'].active, 1);
@@ -276,6 +380,9 @@ test('Mini App копирует категорию при создании и с
   });
   assert.equal(blank.category, null);
   assert.equal(blank.period, null);
+  assert.equal((await call(`tasks/${blank.id}`, { method: 'DELETE', body: { version: blank.version + 1 } })).code, 409);
+  assert.equal((await call(`tasks/${blank.id}`, { method: 'DELETE', body: { version: blank.version } })).code, 200);
+  assert.equal((await call(`tasks/${blank.id}`)).code, 404);
   assert.equal((await patch(currentParent, { categoryChoice: { id: category.id }, tagChoices: [{ id: tag.id }, { name: 'Для двоих' }] })).code, 200);
   assert.equal((await call(`labels/${tag.id}`, { method: 'PATCH', body: { color: '#4287AF' } })).data.label.color, '#4287af');
   const repeated = await call('labels', { method: 'POST', body: { kind: 'category', name: ' быт ' } });

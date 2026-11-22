@@ -147,11 +147,18 @@ export function webServer({ store, token, username, timeZone }) {
         if (request.method === 'PATCH') {
           return sendJson(response, 200, { task: store.updateTask(space.id, id, await bodyOf(request)) });
         }
+        if (request.method === 'DELETE') {
+          const { version } = await bodyOf(request);
+          store.deleteSubtask(space.id, id, version);
+          return sendJson(response, 200, { ok: true });
+        }
       }
       throw new InputError('Маршрут не найден.', 404);
     } catch (error) {
       if (response.destroyed) return;
-      if (error instanceof InputError) return sendJson(response, error.status, { error: error.message });
+      if (error instanceof InputError) {
+        return sendJson(response, error.status, { error: error.message, activeSubtasks: error.activeSubtasks });
+      }
       console.error('Ошибка Mini App:', error.message);
       return sendJson(response, 500, { error: 'Не удалось обработать запрос.' });
     }
