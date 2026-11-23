@@ -401,8 +401,11 @@ export class Bot {
 
   async showList(ctx, scope, status, page) {
     const major = scope === 'major';
-    const view = major ? 'major' : scope.length === 4 && scope !== 'none' ? 'year' : 'common';
     const filterScope = major ? 'all' : parseScope(scope);
+    let view = 'common';
+    if (major) view = 'major';
+    else if (filterScope.length === 7) view = 'month';
+    else if (filterScope.length === 4 && filterScope !== 'none') view = 'year';
     const list = this.store.list(ctx.space.id, { scope: filterScope, status, view });
     const endPage = Math.max(0, Math.ceil(list.length / pageSize) - 1);
     const current = Math.min(endPage, Math.max(0, page || 0));

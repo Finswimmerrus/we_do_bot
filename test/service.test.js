@@ -508,6 +508,9 @@ test('сроки и крупные задачи разделены, работа
   const month = store.createTask(space, 11, { title: 'Оплатить ЖКХ', period: '2026-11', categoryChoice: { id: bills.id } });
   const year = store.createTask(space, 11, { title: 'Запланировать ремонт', period: '2026' });
   const untimed = store.createTask(space, 11, { title: 'Починить полку' });
+  store.createTask(space, 11, { title: 'День из октября', period: '2026-10-31' });
+  const lastDay = store.createTask(space, 11, { title: 'Последний день ноября', period: '2026-11-30' });
+  store.createTask(space, 11, { title: 'День из декабря', period: '2026-12-01' });
   assert.throws(() => store.createTask(space, 11, { title: 'Чужой', assigneeId: 33 }));
   assert.throws(() => store.createTask(space, 11, { title: 'Подзадача', parentId: big.id, importance: 'global' }));
 
@@ -535,15 +538,22 @@ test('сроки и крупные задачи разделены, работа
   assert.equal(filteredDay.dayFinished, true);
   assert.deepEqual(filteredDay.members, session.members);
   assert.deepEqual(ids((await get('tasks?scope=2026-11-21&view=day')).tasks), [late.id]);
-  assert.deepEqual(ids((await get('tasks?scope=2026-11&view=month')).tasks), [month.id]);
+  const november = await get('tasks?scope=2026-11&view=month&include=catalog');
+  assert.deepEqual(ids(november.tasks), [lastDay.id, month.id, late.id, partner.id, today.id]);
+  const filteredMonth = await get('tasks?scope=2026-11&view=month&assignee=partner&categoryId=' + bills.id);
+  assert.deepEqual(ids(filteredMonth.tasks), [late.id, partner.id]);
   assert.deepEqual(ids((await get('tasks?scope=2026&view=year')).tasks), [year.id]);
   assert.deepEqual(ids((await get('tasks?scope=none&view=unscheduled')).tasks), [untimed.id]);
   assert.deepEqual(ids((await get('tasks?view=major')).tasks), [big.id]);
   const stats = await get('tasks?scope=2026&view=statistics&include=summary');
-  assert.equal(stats.stats.total, 5);
-  assert.equal(stats.monthStats['2026-11'].total, 4);
+  assert.equal(stats.stats.total, 8);
+  assert.equal(stats.monthStats['2026-11'].total, 5);
   await receive(11, '/day');
   assert.match(last('sendMessage').text, /Купить билеты/);
+  await receive(11, '/month ноябрь');
+  assert.match(last('sendMessage').text, /Последний день ноября/);
+  assert.match(last('sendMessage').text, /Оплатить ЖКХ/);
+  assert.doesNotMatch(last('sendMessage').text, /День из (октября|декабря)/);
   await receive(11, '/backlog');
   assert.doesNotMatch(last('sendMessage').text, /Отпуск\n/);
 });

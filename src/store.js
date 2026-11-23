@@ -678,7 +678,8 @@ export class Store {
       args.push(exactDay(scope));
     } else if (scope === 'none') filters.push('t.period IS NULL');
     else if (scope !== 'all') {
-      const range = scope.length === 4 && view !== 'year' || scope.length === 7 && view === 'statistics';
+      const range = (scope.length === 4 && view !== 'year')
+        || (scope.length === 7 && (view === 'month' || view === 'statistics'));
       filters.push(range ? `substr(t.period, 1, ${scope.length}) = ?` : 't.period = ?');
       args.push(scope);
     }

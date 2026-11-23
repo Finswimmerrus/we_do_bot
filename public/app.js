@@ -286,7 +286,7 @@ function assigneeBadge(id) {
   return badge;
 }
 
-function taskRow(task, hidePeriod, expanded) {
+function taskRow(task, listScope, expanded) {
   const row = element('details', undefined, 'task-row');
   row.open = expanded;
   row.dataset.taskId = task.id;
@@ -298,7 +298,7 @@ function taskRow(task, hidePeriod, expanded) {
   const category = task.category && (ui.catalog.categories.find(({ name }) => name === task.category) ?? { name: task.category });
   if (category) labels.append(categoryChip(category, true));
   labels.append(priorityBadge(task.importance, true));
-  if (!hidePeriod && task.period) labels.append(element('small', periodLabel(task.period), 'row-period'));
+  if (task.period && task.period !== listScope) labels.append(element('small', periodLabel(task.period), 'row-period'));
   if (task.status === 'obsolete') labels.append(taskHint('–', 'Отменена'));
   summary.append(labels);
 
@@ -340,9 +340,9 @@ function taskRow(task, hidePeriod, expanded) {
   return row;
 }
 
-function renderTaskList(container, tasks, hidePeriod = false) {
+function renderTaskList(container, tasks, listScope) {
   const expanded = new Set([...container.querySelectorAll('details[open]')].map((row) => Number(row.dataset.taskId)));
-  container.replaceChildren(...tasks.map((task) => taskRow(task, hidePeriod, expanded.has(task.id))));
+  container.replaceChildren(...tasks.map((task) => taskRow(task, listScope, expanded.has(task.id))));
 }
 
 function taskHint(symbol, label) {
@@ -512,8 +512,7 @@ async function loadList() {
     renderTaskList($('carryover-list'), carryover);
     $('day-rollover-note').hidden = view !== 'day' || scope !== today || !dayFinished
       || !tasks.some((task) => task.status === 'active');
-    const hidePeriod = view !== 'major';
-    renderTaskList($('task-list'), tasks, hidePeriod);
+    renderTaskList($('task-list'), tasks, scope);
     $('list-empty').hidden = tasks.length > 0;
     $('list-empty').textContent = $('filters-toggle').dataset.filtered === 'true' ? 'По этим фильтрам задач нет.'
       : view === 'day' ? 'На этот день задач нет.' : 'Задач пока нет.';
