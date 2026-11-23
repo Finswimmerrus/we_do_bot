@@ -88,6 +88,12 @@ function button(text, callback) {
   return { text, callback_data: callback };
 }
 
+const groupStart = 'pair-chat';
+
+export function groupSetupUrl(username) {
+  return `https://t.me/${username}?startgroup=${groupStart}`;
+}
+
 function taskActionButtons(task, context) {
   return Object.entries(statusActions)
     .filter(([status]) => status !== task.status)
@@ -173,12 +179,17 @@ export class Bot {
       : { text: 'Mini App в личном чате', url: `https://t.me/${this.username}?start=app` }];
   }
 
-  homeRows(message) {
+  groupButton() {
+    return { text: 'Добавить бота в группу', url: groupSetupUrl(this.username) };
+  }
+
+  homeRows({ message, space }) {
     return [
       [button('＋ Добавить задачу', 'add'), button('Бэклог', 'l:all:active:0')],
       [button('Сегодня', `l:${currentDay(this.timeZone, this.now())}:active:0`), button('Текущий месяц', `l:${this.period}:all:0`)],
       [button('Текущий год', `y:${this.period.slice(0, 4)}`), button('Крупные', 'l:major:active:0')],
       this.appButton(message),
+      message.chat.type === 'private' && space.groupChat === null ? [this.groupButton()] : [],
     ];
   }
 
@@ -330,7 +341,7 @@ export class Bot {
       const text = ctx.space.invite
         ? `Ваше пространство готово. Пригласите партнёра по ссылке:\n${this.inviteUrl(ctx)}`
         : 'Общее пространство пары';
-      return this.show(ctx, text, this.homeRows(message));
+      return this.show(ctx, text, this.homeRows(ctx));
     }
     if (name === 'help') {
       return this.send(message, [
@@ -339,15 +350,23 @@ export class Bot {
         '/invite в личном чате · /link в общем чате · /unlink',
       ].join('\n'));
     }
-    if (name === 'link') {
-      if (ctx.private) return this.send(message, 'Добавьте бота в общий чат пары и отправьте там /link.');
+    const group = message.chat.type === 'group' || message.chat.type === 'supergroup';
+    if (name === 'link' || name === 'start' && group && args === groupStart) {
+      if (ctx.private) {
+        if (ctx.space && ctx.space.groupChat !== null) return this.send(message, 'Общий чат уже подключён. Его можно отключить командой /unlink.');
+        return this.show(ctx, 'Выберите группу пары. Ответы бота будут видны участникам группы.', [[this.groupButton()]]);
+      }
+      if (!group) return;
       if (!ctx.space) throw new InputError('Сначала откройте пространство командой /start в личном чате.');
       this.applyAction(ctx, () => this.store.linkGroup(ctx.space.id, message.chat.id));
       return this.send(message, 'Общий чат подключён. Ответы бота видны участникам этого чата.');
     }
+    if (name === 'start' && group && ctx.space?.groupChat !== message.chat.id) {
+      return this.send(message, `Чтобы подключить эту группу, участнику пространства нужно отправить /link@${this.username}.`);
+    }
     if (name !== 'unlink' || !this.store.hasTelegramAction(ctx.updateId)) this.requireAccess(ctx);
     switch (name) {
-      case 'start': return this.show(ctx, 'Общее пространство пары', this.homeRows(message));
+      case 'start': return this.show(ctx, 'Общее пространство пары', this.homeRows(ctx));
       case 'invite':
         if (!ctx.private) return this.send(message, 'Ссылка-приглашение доступна в личном чате.');
         return this.send(message, ctx.space.invite ? this.inviteUrl(ctx) : 'Партнёр уже присоединился.');
@@ -620,12 +639,12 @@ export class Bot {
           throw new InputError('Откройте приглашение ещё раз в личном чате с ботом.');
         }
         ctx.space = this.applyAction(ctx, () => this.store.joinOrCreate(ctx.user, scope, source));
-        await this.show(ctx, 'Вы присоединились к партнёру. Ваши задачи теперь в общем бэклоге.', this.homeRows(ctx.message));
+        await this.show(ctx, 'Вы присоединились к партнёру. Ваши задачи теперь в общем бэклоге.', this.homeRows(ctx));
         return;
       }
       case 'stay': {
         if (!ctx.private) throw new InputError('Откройте личный чат с ботом.');
-        await this.show(ctx, 'Вы остались в своём пространстве.', this.homeRows(ctx.message));
+        await this.show(ctx, 'Вы остались в своём пространстве.', this.homeRows(ctx));
         return;
       }
       case 'l': await this.showList(ctx, scope, status, Number(page)); return;

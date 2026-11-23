@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { currentDay, localHour, InputError } from './periods.js';
 import { categoryIcons, taskStats } from './store.js';
+import { groupSetupUrl } from './bot.js';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -103,6 +104,7 @@ export function webServer({ store, token, username, timeZone, dailyReviewHour = 
           members,
           partnerJoined: space.memberCount === 2,
           groupLinked: space.groupChat !== null,
+          groupSetupUrl: space.groupChat === null ? groupSetupUrl(username) : null,
           invite: space.invite ? `https://t.me/${username}?start=${space.invite}` : null,
           linkCommand: `/link@${username}`,
           categoryIcons,

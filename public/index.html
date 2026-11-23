@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Вместе — задачи пары</title>
-  <link rel="stylesheet" href="/style.css?v=7">
+  <link rel="stylesheet" href="/style.css?v=9">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-  <script src="/app.js?v=8" defer></script>
+  <script src="/app.js?v=9" defer></script>
 </head>
 <body>
   <main>
@@ -182,6 +182,8 @@
         <div class="card">
           <h2>Общий чат</h2>
           <p id="group-info"></p>
+          <a id="group-setup" class="button-link primary" hidden>Добавить бота в группу</a>
+          <p id="group-help" hidden>Если бот уже в группе, отправьте в ней <code id="group-command"></code>.</p>
         </div>
       </section>
       <section id="labels-view" hidden>

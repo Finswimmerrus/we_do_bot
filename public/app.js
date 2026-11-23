@@ -764,8 +764,9 @@ async function reviewAction(change) {
 }
 
 async function openSettings() {
-  ui.cardRequest++;
+  const request = ++ui.cardRequest;
   const session = await api('session');
+  if (request !== ui.cardRequest) return;
   ui.session = session;
   syncAssigneeFilter();
   $('partner-info').textContent = session.partnerJoined ? 'Партнёр уже присоединился.' : 'Отправьте ссылку партнёру. Она действует до первого подключения.';
@@ -774,7 +775,11 @@ async function openSettings() {
   if (session.invite) $('invite-link').href = session.invite;
   $('group-info').textContent = session.groupLinked
     ? 'Чат подключён. Команда /unlink в личном чате с ботом отключит его.'
-    : `Добавьте бота в чат пары и отправьте ${session.linkCommand}. Ответы бота будут видны участникам чата.`;
+    : 'Выберите группу пары в Telegram. Ответы бота будут видны участникам выбранной группы.';
+  $('group-setup').hidden = !session.groupSetupUrl;
+  if (session.groupSetupUrl) $('group-setup').href = session.groupSetupUrl;
+  $('group-help').hidden = session.groupLinked;
+  $('group-command').textContent = session.linkCommand;
   show('settings');
 }
 
@@ -1030,12 +1035,14 @@ function bindUi() {
       notify('Удалено из списка и задач пары.');
     });
   });
-  $('invite-link').addEventListener('click', (event) => {
-    if (tg.openTelegramLink) {
-      event.preventDefault();
-      tg.openTelegramLink(event.currentTarget.href);
-    }
-  });
+  for (const id of ['invite-link', 'group-setup']) {
+    $(id).addEventListener('click', (event) => {
+      if (tg.openTelegramLink) {
+        event.preventDefault();
+        tg.openTelegramLink(event.currentTarget.href);
+      }
+    });
+  }
   $('copy-invite').addEventListener('click', () => run(async () => {
     await navigator.clipboard.writeText($('invite-link').href);
     notify('Ссылка скопирована.');
@@ -1043,6 +1050,7 @@ function bindUi() {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && ui.panel === 'list') run(loadList);
     if (!document.hidden && ui.panel === 'labels') run(renderLabels);
+    if (!document.hidden && ui.panel === 'settings') run(openSettings);
   });
   setInterval(() => {
     if (!document.hidden && ui.panel === 'list' && ui.view === 'day') loadList().catch(() => {});

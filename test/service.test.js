@@ -74,10 +74,19 @@ test('личный и связанный общий чаты использую�
   await receive(11, '/start');
   const initial = store.spaceFor(11);
   assert.match(last('sendMessage').text, new RegExp(initial.invite));
+  const addToGroup = last('sendMessage').reply_markup.inline_keyboard.flat()
+    .find(({ text }) => text === 'Добавить бота в группу');
+  assert.equal(addToGroup.url, 'https://t.me/test_bot?startgroup=pair-chat');
   await receive(22, `/start ${initial.invite}`);
   assert.equal(store.spaceFor(22).id, initial.id);
   await receive(33, `/start ${initial.invite}`);
   assert.equal(store.spaceFor(33), null);
+  await receive(33, '/start@test_bot pair-chat', group);
+  assert.equal(store.spaceFor(11).groupChat, null);
+  await receive(11, '/start@test_bot pair-chat', group);
+  assert.match(last('sendMessage').text, /Общий чат подключён/);
+  await receive(22, '/start@test_bot pair-chat', { ...group, id: group.id - 1 });
+  assert.match(last('sendMessage').text, /\/unlink/);
   await receive(11, '/link@test_bot', group);
   assert.equal(store.spaceFor(22).groupChat, group.id);
   await receive(11, '/task Купить билеты');
@@ -530,6 +539,7 @@ test('сроки и крупные задачи разделены, работа
   const session = await get('session');
   assert.equal(session.currentDay, '2026-11-22');
   assert.equal(session.partnerId, 22);
+  assert.equal(session.groupSetupUrl, 'https://t.me/test_bot?startgroup=pair-chat');
   assert.deepEqual(session.members, [{ id: 11, name: 'Тест', slot: 1 }, { id: 22, name: 'Имя 22', slot: 2 }]);
   assert.deepEqual(ids((await get('tasks?scope=2026-11-22&view=day&assignee=me')).tasks), [today.id]);
   const filteredDay = await get('tasks?scope=2026-11-22&view=day&assignee=partner&include=catalog&categoryId=' + bills.id);
@@ -556,4 +566,8 @@ test('сроки и крупные задачи разделены, работа
   assert.doesNotMatch(last('sendMessage').text, /День из (октября|декабря)/);
   await receive(11, '/backlog');
   assert.doesNotMatch(last('sendMessage').text, /Отпуск\n/);
+  await receive(11, '/start@test_bot pair-chat', group);
+  const linked = await get('session', 22);
+  assert.equal(linked.groupLinked, true);
+  assert.equal(linked.groupSetupUrl, null);
 });
