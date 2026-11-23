@@ -17,7 +17,7 @@ export const categoryIcons = {
 };
 
 const taskFields = `
-  SELECT t.id, t.title, t.status, t.period, t.category,
+  SELECT t.id, t.title, t.description, t.status, t.period, t.category,
     t.importance, t.tags, t.assignee_id AS assigneeId, t.parent_id AS parentId,
     p.title AS parentTitle, t.created_by AS createdBy, t.created_at AS createdAt,
     t.completed_at AS completedAt, t.version
@@ -29,6 +29,7 @@ function taskTable(name) {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     space_id INTEGER NOT NULL REFERENCES spaces(id),
     title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'done', 'obsolete')),
     period TEXT,
     category TEXT,
@@ -62,6 +63,13 @@ export function taskTitle(value) {
   const title = cleanText(value, 200, 'Название');
   if (!title) throw new InputError('Введите название задачи.');
   return title;
+}
+
+function taskDescription(value) {
+  if (typeof value !== 'string' || value.trim().length > 2000) {
+    throw new InputError('Описание — до 2000 символов.');
+  }
+  return value.trim();
 }
 
 function cleanTags(value) {
@@ -132,6 +140,7 @@ export class Store {
         user_id INTEGER PRIMARY KEY,
         space_id INTEGER NOT NULL REFERENCES spaces(id),
         slot INTEGER NOT NULL CHECK (slot IN (1, 2)),
+        display_name TEXT,
         UNIQUE (space_id, slot)
       ) STRICT;
       ${taskTable('tasks')}
@@ -257,7 +266,13 @@ export class Store {
   }
 
   members(space) {
-    return this.db.prepare('SELECT user_id AS id FROM members WHERE space_id = ? ORDER BY slot').all(space);
+    return this.db.prepare('SELECT user_id AS id, display_name AS name, slot FROM members WHERE space_id = ? ORDER BY slot').all(space);
+  }
+
+  rememberMemberName(user, firstName) {
+    if (typeof firstName !== 'string') return;
+    const name = firstName.trim().replace(/\s+/g, ' ').slice(0, 128);
+    if (name) this.db.prepare('UPDATE members SET display_name = ? WHERE user_id = ? AND display_name IS NOT ?').run(name, user, name);
   }
 
   #assignee(space, value) {
@@ -275,7 +290,7 @@ export class Store {
         if (current) return current;
         const { lastInsertRowid } = this.db.prepare('INSERT INTO spaces (invite) VALUES (?)')
           .run(randomBytes(18).toString('base64url'));
-        this.db.prepare('INSERT INTO members VALUES (?, ?, 1)').run(user, lastInsertRowid);
+        this.db.prepare('INSERT INTO members (user_id, space_id, slot) VALUES (?, ?, 1)').run(user, lastInsertRowid);
         return this.spaceFor(user);
       }
 
@@ -297,7 +312,7 @@ export class Store {
         throw new InputError('Ваше пространство изменилось. Откройте приглашение ещё раз.');
       }
       if (current) this.#moveSoloSpace(current.id, target.id, user);
-      else this.db.prepare('INSERT INTO members VALUES (?, ?, 2)').run(user, target.id);
+      else this.db.prepare('INSERT INTO members (user_id, space_id, slot) VALUES (?, ?, 2)').run(user, target.id);
       this.db.prepare('UPDATE spaces SET invite = NULL WHERE id = ?').run(target.id);
       this.db.prepare('INSERT INTO accepted_invites (token, space_id) VALUES (?, ?)').run(invite, target.id);
       return this.spaceFor(user);
@@ -352,14 +367,14 @@ export class Store {
   }
 
   #migrateSchema() {
-    if (this.db.prepare('PRAGMA user_version').get().user_version >= 5) return;
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 6) return;
     const { sql } = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").get();
     const rebuildTasks = !/\bAUTOINCREMENT\b/i.test(sql);
     if (rebuildTasks) this.db.exec('PRAGMA foreign_keys = OFF');
     try {
       this.transaction(() => {
         const version = this.db.prepare('PRAGMA user_version').get().user_version;
-        if (version >= 5) return;
+        if (version >= 6) return;
         if (version < 2) {
           if (!this.db.prepare('PRAGMA table_info(tasks)').all().some(({ name }) => name === 'importance')) {
             this.db.exec(`ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'low'
@@ -378,8 +393,14 @@ export class Store {
         if (!this.db.prepare('PRAGMA table_info(tasks)').all().some(({ name }) => name === 'assignee_id')) {
           this.db.exec('ALTER TABLE tasks ADD COLUMN assignee_id INTEGER REFERENCES members(user_id)');
         }
+        if (!this.db.prepare('PRAGMA table_info(tasks)').all().some(({ name }) => name === 'description')) {
+          this.db.exec("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+        }
+        if (!this.db.prepare('PRAGMA table_info(members)').all().some(({ name }) => name === 'display_name')) {
+          this.db.exec('ALTER TABLE members ADD COLUMN display_name TEXT');
+        }
         if (rebuildTasks) this.#migrateTaskIds();
-        this.db.exec('PRAGMA user_version = 5');
+        this.db.exec('PRAGMA user_version = 6');
       });
     } finally {
       if (rebuildTasks) this.db.exec('PRAGMA foreign_keys = ON');
@@ -387,7 +408,7 @@ export class Store {
   }
 
   #migrateTaskIds() {
-    const columns = 'id, space_id, title, status, period, category, tags, parent_id, created_by, created_at, completed_at, version, source, importance, assignee_id';
+    const columns = 'id, space_id, title, description, status, period, category, tags, parent_id, created_by, created_at, completed_at, version, source, importance, assignee_id';
     this.db.exec(`
       ${taskTable('new_tasks')}
       INSERT INTO new_tasks (${columns}) SELECT ${columns} FROM tasks;
@@ -513,17 +534,18 @@ export class Store {
       .all(space, id).map(asTask);
   }
 
-  #insertTask(space, user, { title, parentId = null, period = null, category = null, assigneeId = null, importance = 'low', source = null }) {
+  #insertTask(space, user, { title, description = '', parentId = null, period = null, category = null, assigneeId = null, importance = 'low', source = null }) {
     const { lastInsertRowid } = this.db.prepare(`
-      INSERT INTO tasks (space_id, title, parent_id, period, category, assignee_id, importance, created_by, created_at, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(space, title, parentId, period, category, assigneeId, importance, user, new Date().toISOString(), source);
+      INSERT INTO tasks (space_id, title, description, parent_id, period, category, assignee_id, importance, created_by, created_at, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(space, title, description, parentId, period, category, assigneeId, importance, user, new Date().toISOString(), source);
     return Number(lastInsertRowid);
   }
 
   createTask(space, user, input, source = null) {
-    const { title, parentId = null, period = null, assigneeId = null, importance = 'low' } = input;
+    const { title, description = '', parentId = null, period = null, assigneeId = null, importance = 'low' } = input;
     const name = taskTitle(title);
+    const details = taskDescription(description);
     return this.transaction(() => {
       if (source) {
         const existing = this.db.prepare('SELECT id FROM tasks WHERE space_id = ? AND source = ?').get(space, source);
@@ -537,7 +559,8 @@ export class Store {
       const taskPeriod = period === null ? null : exactSchedule(period);
       checkImportance(importance, parentId);
       return this.task(space, this.#insertTask(space, user, {
-        title: name, parentId, period: taskPeriod, category, assigneeId: this.#assignee(space, assigneeId), importance, source,
+        title: name, description: details, parentId, period: taskPeriod, category,
+        assigneeId: this.#assignee(space, assigneeId), importance, source,
       }));
     });
   }
@@ -602,6 +625,7 @@ export class Store {
       if ('importance' in patch) task.importance = patch.importance;
       checkImportance(task.importance, task.parentId);
       if ('title' in patch) task.title = taskTitle(patch.title);
+      if ('description' in patch) task.description = taskDescription(patch.description);
       if ('status' in patch) {
         if (typeof patch.status !== 'string' || !Object.hasOwn(statuses, patch.status)) {
           throw new InputError('Выберите статус задачи.');
@@ -632,9 +656,9 @@ export class Store {
         task.tags = this.#namesForTags(space, cleanTags(patch.tags));
       }
       this.db.prepare(`
-        UPDATE tasks SET title = ?, status = ?, period = ?, category = ?, importance = ?, tags = ?, parent_id = ?, assignee_id = ?,
+        UPDATE tasks SET title = ?, description = ?, status = ?, period = ?, category = ?, importance = ?, tags = ?, parent_id = ?, assignee_id = ?,
           completed_at = ?, version = version + 1 WHERE space_id = ? AND id = ?
-      `).run(task.title, task.status, task.period, task.category, task.importance, JSON.stringify(task.tags),
+      `).run(task.title, task.description, task.status, task.period, task.category, task.importance, JSON.stringify(task.tags),
         task.parentId, task.assigneeId, task.completedAt, space, id);
       return this.task(space, id);
     });

@@ -29,7 +29,7 @@ function setup(t) {
     now: () => new Date('2026-11-22T12:00:00Z'),
   });
   const receive = (user, text, chat = { id: user, type: 'private' }, replyTo = null) => {
-    const message = { message_id: ++messageId, chat, from: { id: user }, text };
+    const message = { message_id: ++messageId, chat, from: { id: user, first_name: `Имя ${user}` }, text };
     if (text.startsWith('/')) message.entities = [{ type: 'bot_command', offset: 0, length: text.split(' ')[0].length }];
     if (replyTo) message.reply_to_message = { message_id: replyTo };
     return bot.handle({ message });
@@ -405,15 +405,21 @@ test('Mini App копирует категорию при создании и с
 
   const patch = (task, data) => call(`tasks/${task.id}`, { method: 'PATCH', body: { version: task.version, ...data } });
   const { data: { task: plannedParent } } = await patch(parent, { period: '2026-10', category: 'Быт', importance: 'global' });
-  const { code, data: { task: child } } = await call('tasks', { method: 'POST', body: { title: 'Билеты', parentId: parent.id } });
+  assert.equal(parent.description, '');
+  const { code, data: { task: child } } = await call('tasks', {
+    method: 'POST', body: { title: 'Билеты', description: 'Поезд\nДва билета', parentId: parent.id },
+  });
   assert.equal(code, 201);
   assert.equal(child.period, null);
   assert.equal(child.category, 'Быт');
+  assert.equal(child.description, 'Поезд\nДва билета');
+  assert.equal((await patch(child, { description: 'я'.repeat(2001) })).code, 400);
   assert.equal((await call('tasks', { method: 'POST', body: { title: 'Ещё уровень', parentId: child.id } })).code, 400);
   assert.equal((await patch(plannedParent, { parentId: child.id })).code, 400);
   assert.equal((await patch(child, { importance: 'global' })).code, 400);
-  const { data: { task: plannedChild } } = await patch(child, { period: '2026-10', tags: ['Дом', 'дом'], importance: 'high' });
+  const { data: { task: plannedChild } } = await patch(child, { description: 'На двоих', period: '2026-10', tags: ['Дом', 'дом'], importance: 'high' });
   assert.equal(plannedChild.period, '2026-10');
+  assert.equal((await call(`tasks/${child.id}`)).data.task.description, 'На двоих');
   assert.equal(plannedChild.category, 'Быт');
   assert.equal(plannedChild.importance, 'high');
   const completion = { period: '2026-11', category: 'Поездки', status: 'done' };
@@ -521,11 +527,14 @@ test('сроки и крупные задачи разделены, работа
   const session = await get('session');
   assert.equal(session.currentDay, '2026-11-22');
   assert.equal(session.partnerId, 22);
+  assert.deepEqual(session.members, [{ id: 11, name: 'Тест', slot: 1 }, { id: 22, name: 'Имя 22', slot: 2 }]);
   assert.deepEqual(ids((await get('tasks?scope=2026-11-22&view=day&assignee=me')).tasks), [today.id]);
   const filteredDay = await get('tasks?scope=2026-11-22&view=day&assignee=partner&include=catalog&categoryId=' + bills.id);
   assert.deepEqual(ids(filteredDay.tasks), [partner.id]);
   assert.deepEqual(ids(filteredDay.carryover), [late.id]);
   assert.equal(filteredDay.dayFinished, true);
+  assert.deepEqual(filteredDay.members, session.members);
+  assert.deepEqual(ids((await get('tasks?scope=2026-11-21&view=day')).tasks), [late.id]);
   assert.deepEqual(ids((await get('tasks?scope=2026-11&view=month')).tasks), [month.id]);
   assert.deepEqual(ids((await get('tasks?scope=2026&view=year')).tasks), [year.id]);
   assert.deepEqual(ids((await get('tasks?scope=none&view=unscheduled')).tasks), [untimed.id]);

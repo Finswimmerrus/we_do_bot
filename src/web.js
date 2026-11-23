@@ -10,7 +10,7 @@ const assets = new Map([
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
 ].map(([path, [file, type]]) => [path, { body: readFileSync(new URL(`../public/${file}`, import.meta.url)), type }]));
 
-export function telegramUser(initData, token, now = Date.now()) {
+function telegramProfile(initData, token, now = Date.now()) {
   if (typeof initData !== 'string' || !initData || initData.length > 8192) return null;
   const data = new URLSearchParams(initData);
   const hash = data.get('hash');
@@ -24,8 +24,8 @@ export function telegramUser(initData, token, now = Date.now()) {
   const issued = Number(data.get('auth_date')) * 1000;
   if (!Number.isSafeInteger(issued) || issued < now - 86_400_000 || issued > now + 60_000) return null;
   try {
-    const { id } = JSON.parse(data.get('user'));
-    return Number.isSafeInteger(id) && id > 0 ? id : null;
+    const { id, first_name: firstName } = JSON.parse(data.get('user'));
+    return Number.isSafeInteger(id) && id > 0 ? { id, firstName } : null;
   } catch {
     return null;
   }
@@ -84,11 +84,14 @@ export function webServer({ store, token, username, timeZone, dailyReviewHour = 
       }
       if (request.method === 'GET' && pathname === '/health') return sendJson(response, 200, { ok: true });
       if (!pathname.startsWith('/api/')) throw new InputError('Страница не найдена.', 404);
-      const user = telegramUser(request.headers['x-telegram-init-data'], token);
-      if (!user) throw new InputError('Откройте приложение из личного чата с ботом.', 401);
+      const profile = telegramProfile(request.headers['x-telegram-init-data'], token);
+      if (!profile) throw new InputError('Откройте приложение из личного чата с ботом.', 401);
+      const user = profile.id;
       const space = store.spaceFor(user);
       if (!space) throw new InputError('Сначала отправьте боту команду /start.', 403);
-      const partner = store.members(space.id).find(({ id }) => id !== user)?.id;
+      if (pathname === '/api/session' && request.method === 'GET') store.rememberMemberName(user, profile.firstName);
+      const members = store.members(space.id);
+      const partner = members.find(({ id }) => id !== user)?.id;
 
       if (pathname === '/api/session' && request.method === 'GET') {
         const today = currentDay(timeZone, now());
@@ -97,6 +100,7 @@ export function webServer({ store, token, username, timeZone, dailyReviewHour = 
           currentDay: today,
           userId: user,
           partnerId: partner ?? null,
+          members,
           partnerJoined: space.memberCount === 2,
           groupLinked: space.groupChat !== null,
           invite: space.invite ? `https://t.me/${username}?start=${space.invite}` : null,
@@ -137,7 +141,7 @@ export function webServer({ store, token, username, timeZone, dailyReviewHour = 
           const carryover = options.view === 'day' && options.scope === today && options.status !== 'done' && options.status !== 'obsolete'
             ? store.list(space.id, { ...options, view: 'carryover', status: 'active' }) : [];
           return sendJson(response, 200, {
-            tasks, catalog, suggestions, carryover, today, partnerId: partner ?? null,
+            tasks, catalog, suggestions, carryover, today, partnerId: partner ?? null, members,
             dayFinished: localHour(timeZone, clock) >= dailyReviewHour,
           });
         }

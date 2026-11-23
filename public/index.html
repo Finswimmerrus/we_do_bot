@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Вместе — задачи пары</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=6">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=6" defer></script>
 </head>
 <body>
   <main>
@@ -28,18 +28,16 @@
       <section id="list-view">
         <div class="heading">
           <h1 id="view-title">День</h1>
+          <button id="quick-add-toggle" class="primary icon-button" type="button" title="Добавить задачу"
+            aria-label="Добавить задачу" aria-controls="quick-add" aria-expanded="false" hidden><span aria-hidden="true">+</span></button>
           <button id="review-start" type="button" hidden>Разобрать</button>
         </div>
-        <form id="quick-add" class="quick-add">
-          <input id="new-title" placeholder="Новая задача" aria-label="Название новой задачи" maxlength="200" required>
-          <button class="primary" type="submit">Добавить</button>
-        </form>
-        <div class="filters">
+        <div class="list-toolbar">
           <label id="period-mode-label" hidden>Период
             <select id="period-mode"><option value="month">Месяц</option><option value="year">Год</option></select>
           </label>
-          <label id="scope-day-label" hidden>День
-            <input id="scope-day" type="date">
+          <label id="scope-day-label" hidden>
+            <input id="scope-day" type="date" aria-label="Дата списка" min="1000-01-01" max="9999-12-31">
           </label>
           <label id="scope-month-label" hidden>Месяц
             <input id="scope-month" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])">
@@ -47,18 +45,27 @@
           <label id="scope-year-label" hidden>Год
             <input id="scope-year" type="number" min="1000" max="9999">
           </label>
-          <label data-task-filter>Статус
+          <button id="filters-toggle" class="quiet" type="button" aria-controls="task-filters" aria-expanded="false" hidden>Фильтры</button>
+        </div>
+        <form id="quick-add" class="editor card" hidden>
+          <label class="wide">Название<input id="new-title" maxlength="200" required></label>
+          <label class="wide">Описание<textarea id="new-description" rows="2" maxlength="2000"></textarea></label>
+          <label class="wide">Исполнитель<select id="new-assignee"></select></label>
+          <div class="wide actions"><button class="primary" type="submit">Добавить</button></div>
+        </form>
+        <div id="task-filters" class="filters" hidden>
+          <label>Статус
             <select id="filter-status"><option value="active">Активные</option><option value="done">Выполненные</option><option value="obsolete">Неактуальные</option><option value="all">Все статусы</option></select>
           </label>
-          <label data-task-filter>Поиск<input id="filter-query" type="search" placeholder="Название"></label>
-          <label data-task-filter>Категория<select id="filter-category"><option value="">Все</option></select></label>
-          <label data-task-filter>Кому
+          <label>Поиск<input id="filter-query" type="search" placeholder="Название"></label>
+          <label>Категория<select id="filter-category"><option value="">Все</option></select></label>
+          <label>Исполнитель
             <select id="filter-assignee">
-              <option value="all">Всем</option><option value="me">Мне</option>
-              <option value="partner">Партнёру</option><option value="none">Без назначения</option>
+              <option value="all">Все</option><option value="me">Вы</option>
+              <option value="partner">Партнёр</option><option value="none">Без исполнителя</option>
             </select>
           </label>
-          <label data-task-filter>Важность
+          <label>Важность
             <select id="filter-importance">
               <option value="">Любая</option><option value="low">Низкая</option>
               <option value="medium">Средняя</option><option value="high">Важная</option>
@@ -67,13 +74,13 @@
         </div>
         <div id="stats" class="stats" hidden></div>
         <div id="year-grid" class="year-grid" hidden></div>
+        <p id="list-empty" class="empty" hidden></p>
+        <div id="task-list" class="task-list" aria-live="polite"></div>
+        <p id="day-rollover-note" class="day-rollover-note" hidden>Откройте незавершённую задачу, чтобы перенести её на завтра.</p>
         <section id="carryover" class="carryover" hidden>
           <h2>Незавершённые с прошлых дней</h2>
           <div id="carryover-list" class="task-list"></div>
         </section>
-        <p id="day-rollover-note" class="day-rollover-note" hidden>Остались задачи на сегодня. Кнопка ↪ переносит их на завтра.</p>
-        <p id="list-empty" class="empty" hidden></p>
-        <div id="task-list" class="task-list" aria-live="polite"></div>
       </section>
       <section id="task-view" hidden>
         <button id="task-back" class="quiet back" type="button">‹ К списку</button>
@@ -87,6 +94,7 @@
         </div>
         <form id="task-editor" class="card editor">
           <label class="wide">Название<input id="edit-title" maxlength="200" required></label>
+          <label class="wide">Описание<textarea id="edit-description" rows="3" maxlength="2000"></textarea></label>
           <label>Срок<select id="edit-schedule">
             <option value="">Без срока</option><option value="day">День</option>
             <option value="month">Месяц</option><option value="year">Год</option>
@@ -95,7 +103,7 @@
           <label id="edit-month-label" hidden>Месяц<input id="edit-month" type="month" disabled></label>
           <label id="edit-year-label" hidden>Год<input id="edit-year" type="number" min="1000" max="9999" disabled></label>
           <label>Категория<select id="edit-category"></select></label>
-          <label>Кому<select id="edit-assignee"></select></label>
+          <label>Исполнитель<select id="edit-assignee"></select></label>
           <label id="new-category-field" class="wide" hidden>Название новой категории
             <input id="new-category" maxlength="60" required disabled>
           </label>
@@ -126,7 +134,7 @@
               <summary>Параметры подзадачи</summary>
               <div class="editor">
                 <label>Категория подзадачи<select id="child-category"></select></label>
-                <label>Кому<select id="child-assignee"></select></label>
+                <label>Исполнитель<select id="child-assignee"></select></label>
                 <label>Срок подзадачи<select id="child-schedule">
                   <option value="">Без срока</option><option value="day">День</option>
                   <option value="month">Месяц</option><option value="year">Год</option>
@@ -137,6 +145,7 @@
                 <label id="child-category-new-field" class="wide" hidden>Название новой категории
                   <input id="child-category-new" maxlength="60" required disabled>
                 </label>
+                <label class="wide">Описание<textarea id="child-description" rows="2" maxlength="2000"></textarea></label>
               </div>
             </details>
           </form>

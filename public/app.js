@@ -4,12 +4,12 @@ const $ = (id) => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
 const ui = {
   view: 'day', panel: 'list', listRequest: 0, cardRequest: 0,
-  filterStatus: { day: 'active', month: 'all', year: 'all', unscheduled: 'active', major: 'active' },
-  filterAssignee: { day: 'me', month: 'all', year: 'all', unscheduled: 'all', major: 'all' },
+  filters: {}, selectedDay: null,
   task: null, review: null, session: null,
   catalog: { categories: [] }, labelToDelete: null, today: null, dayFinished: false,
 };
 const viewTitles = { day: 'День', month: 'Месяц', year: 'Год', unscheduled: 'Без срока', major: 'Крупные', statistics: 'Статистика' };
+const filterKeys = ['status', 'assignee', 'category', 'importance', 'query'];
 const importanceNames = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
@@ -77,7 +77,7 @@ function periodLabel(period) {
 function selectedScope() {
   if (ui.view === 'unscheduled') return 'none';
   if (ui.view === 'major') return 'all';
-  if (ui.view === 'day') return $('scope-day').value || ui.today;
+  if (ui.view === 'day') return ui.selectedDay ?? ui.today;
   if (ui.view === 'year' || ui.view === 'statistics' && $('period-mode').value === 'year') {
     return $('scope-year').validity.valid && $('scope-year').value || ui.session.currentPeriod.slice(0, 4);
   }
@@ -151,29 +151,62 @@ function showYear(monthStats) {
   }));
 }
 
-function taskRow(task, hidePeriod = false) {
-  const row = element('div', undefined, 'task-row');
+function memberName(id, distinguishSelf = false) {
+  if (id === null) return 'Без исполнителя';
+  const name = ui.session.members.find((member) => member.id === id)?.name;
+  const mine = id === ui.session.userId;
+  if (!name) return mine ? 'Вы' : 'Партнёр';
+  return mine && distinguishSelf ? `${name} (вы)` : name;
+}
+
+function assigneeBadge(id) {
+  const label = memberName(id, true);
+  const member = ui.session.members.find((entry) => entry.id === id);
+  const badge = element('span', undefined, 'assignee-badge');
+  badge.setAttribute('role', 'img');
+  badge.setAttribute('aria-label', label);
+  badge.title = label;
+  badge.dataset.slot = member?.slot ?? 'pair';
+  if (id === null) badge.append(element('span', undefined, 'pair-symbol'));
+  else {
+    const name = memberName(id);
+    badge.textContent = (name.match(/\p{L}/u)?.[0] ?? [...name][0]).toLocaleUpperCase('ru');
+  }
+  return badge;
+}
+
+function taskRow(task, hidePeriod, expanded) {
+  const row = element('details', undefined, 'task-row');
+  row.open = expanded;
+  row.dataset.taskId = task.id;
   row.dataset.status = task.status;
-  const open = element('button', undefined, 'task-open');
-  open.type = 'button';
-  open.append(element('span', task.title, 'task-title'));
+  const summary = element('summary', undefined, 'task-summary');
+  summary.append(assigneeBadge(task.assigneeId), element('span', task.title, 'task-title'));
   const labels = element('span', undefined, 'task-labels');
   if (task.parentTitle) labels.append(taskHint('↳', `Подзадача к «${task.parentTitle}»`));
-  if (task.category) {
-    const category = ui.catalog.categories.find(({ name }) => name === task.category) ?? { name: task.category };
-    labels.append(categoryChip(category, true));
-  }
+  const category = task.category && (ui.catalog.categories.find(({ name }) => name === task.category) ?? { name: task.category });
+  if (category) labels.append(categoryChip(category, true));
   labels.append(priorityBadge(task.importance, true));
-  if (task.assigneeId) {
-    const isMine = task.assigneeId === ui.session.userId;
-    labels.append(taskHint(isMine ? '👤' : '👥', isMine ? 'Мне' : 'Партнёру'));
-  }
-  if (!hidePeriod && task.period) labels.append(element('small', periodLabel(task.period)));
+  if (!hidePeriod && task.period) labels.append(element('small', periodLabel(task.period), 'row-period'));
   if (task.status === 'obsolete') labels.append(taskHint('–', 'Отменена'));
-  open.append(labels);
-  open.addEventListener('click', () => run(() => openTask(task.id), open));
+  summary.append(labels);
+
+  const details = element('div', undefined, 'task-preview');
+  if (task.description) details.append(element('p', task.description, 'task-description'));
+  if (task.parentTitle) details.append(element('p', `Подзадача к «${task.parentTitle}»`));
+  const metadata = element('div', undefined, 'task-metadata');
+  metadata.append(element('span', memberName(task.assigneeId, true)), element('span', periodLabel(task.period)));
+  if (category) metadata.append(categoryChip(category));
+  metadata.append(priorityBadge(task.importance));
+  if (task.status === 'obsolete') metadata.append(element('span', 'Отменена'));
+  details.append(metadata);
+
   const actions = element('div', undefined, 'task-status-actions');
   renderStatusActions(actions, task);
+  const edit = element('button', 'Редактировать', 'quiet');
+  edit.type = 'button';
+  edit.addEventListener('click', () => run(() => openTask(task.id), edit));
+  actions.append(edit);
   if (ui.view === 'day' && task.status === 'active' && task.period?.length === 10
       && (task.period < ui.today || task.period === ui.today && ui.dayFinished)) {
     const target = task.period < ui.today ? ui.today : nextDay(ui.today);
@@ -191,8 +224,14 @@ function taskRow(task, hidePeriod = false) {
       actions.prepend(move);
     }
   }
-  row.append(open, actions);
+  details.append(actions);
+  row.append(summary, details);
   return row;
+}
+
+function renderTaskList(container, tasks, hidePeriod = false) {
+  const expanded = new Set([...container.querySelectorAll('details[open]')].map((row) => Number(row.dataset.taskId)));
+  container.replaceChildren(...tasks.map((task) => taskRow(task, hidePeriod, expanded.has(task.id))));
 }
 
 function taskHint(symbol, label) {
@@ -319,22 +358,30 @@ async function loadList() {
   $('scope-day-label').hidden = view !== 'day';
   $('scope-month-label').hidden = view !== 'month' && !(statistics && scope.length === 7);
   $('scope-year-label').hidden = view !== 'year' && !(statistics && scope.length === 4);
-  for (const filter of document.querySelectorAll('[data-task-filter]')) filter.hidden = statistics;
   $('filter-importance').closest('label').hidden = statistics || view === 'major';
-  $('quick-add').hidden = statistics;
+  $('quick-add-toggle').hidden = statistics;
+  $('filters-toggle').hidden = statistics;
+  $('filters-toggle').dataset.filtered = !statistics && (params.get('status') !== 'all' || params.get('assignee') !== 'all'
+    || ['query', 'categoryId', 'importance'].some((key) => params.get(key)));
   $('review-start').hidden = !statistics;
   $('view-title').textContent = view === 'day' ? scope === ui.today ? 'Сегодня' : periodLabel(scope)
     : view === 'month' || view === 'year' ? periodLabel(scope) : viewTitles[view];
   $('stats').hidden = !statistics;
   $('task-list').hidden = statistics;
-  $('carryover').hidden = true;
-  $('day-rollover-note').hidden = true;
+  const listKey = `${view}/${scope}`;
+  if ($('task-list').dataset.scope !== listKey) {
+    $('task-list').dataset.scope = listKey;
+    $('task-list').replaceChildren();
+    $('carryover').hidden = true;
+    $('day-rollover-note').hidden = true;
+    $('list-empty').hidden = true;
+  }
   if (statistics) $('list-empty').hidden = true;
   if (!statistics || scope.length !== 4) $('year-grid').hidden = true;
   $('task-list').setAttribute('aria-busy', 'true');
 
   try {
-    const { tasks, stats, monthStats, catalog, carryover, today, dayFinished, partnerId } = await api(`tasks?${params}`);
+    const { tasks, stats, monthStats, catalog, carryover, today, dayFinished, partnerId, members } = await api(`tasks?${params}`);
     if (seq !== ui.listRequest) return;
     if (statistics) {
       showStats(stats);
@@ -346,23 +393,25 @@ async function loadList() {
     ui.today = today;
     ui.dayFinished = dayFinished;
     ui.session.partnerId = partnerId;
+    ui.session.members = members;
     syncAssigneeFilter();
-    if (view === 'day' && scope === previousToday && today !== previousToday) {
+    if (ui.selectedDay === null && today !== previousToday) {
       $('scope-day').value = today;
-      return await loadList();
+      if (view === 'day') return await loadList();
     }
     fillCategoryFilter(catalog.categories);
     if ($('filter-category').value !== params.get('categoryId') || $('filter-assignee').value !== params.get('assignee')) {
       return await loadList();
     }
     $('carryover').hidden = !carryover.length;
-    $('carryover-list').replaceChildren(...carryover.map((task) => taskRow(task)));
+    renderTaskList($('carryover-list'), carryover);
     $('day-rollover-note').hidden = view !== 'day' || scope !== today || !dayFinished
       || !tasks.some((task) => task.status === 'active');
     const hidePeriod = view !== 'major';
-    $('task-list').replaceChildren(...tasks.map((task) => taskRow(task, hidePeriod)));
+    renderTaskList($('task-list'), tasks, hidePeriod);
     $('list-empty').hidden = tasks.length > 0;
-    $('list-empty').textContent = view === 'day' ? 'На этот день по выбранным фильтрам задач нет.' : 'По этим фильтрам задач нет.';
+    $('list-empty').textContent = $('filters-toggle').dataset.filtered === 'true' ? 'По этим фильтрам задач нет.'
+      : view === 'day' ? 'На этот день задач нет.' : 'Задач пока нет.';
     return tasks;
   } finally {
     if (seq === ui.listRequest) $('task-list').removeAttribute('aria-busy');
@@ -370,13 +419,18 @@ async function loadList() {
 }
 
 function changeView(name) {
+  if (name !== ui.view || ui.panel !== 'list') {
+    toggleQuickAdd(false);
+    $('task-filters').hidden = true;
+    $('filters-toggle').setAttribute('aria-expanded', 'false');
+  }
   ui.view = name;
   for (const tab of document.querySelectorAll('[data-view]')) {
     tab.setAttribute('aria-current', tab.dataset.view === name ? 'page' : 'false');
   }
-  if (name !== 'statistics') $('filter-status').value = ui.filterStatus[name];
   if (name !== 'statistics') {
-    $('filter-assignee').value = ui.filterAssignee[name];
+    const filters = ui.filters[name] ?? { status: ['unscheduled', 'major'].includes(name) ? 'active' : 'all', assignee: 'all' };
+    for (const key of filterKeys) $(`filter-${key}`).value = filters[key] ?? '';
     syncAssigneeFilter();
   }
   show('list');
@@ -391,7 +445,7 @@ function showChildren(children) {
   if (available) progress.push(`${counts.done} из ${available} выполнено`, `${counts.active} активно`);
   if (counts.obsolete) progress.push(`${counts.obsolete} неактуально`);
   $('subtask-progress').textContent = progress.join(' · ');
-  $('child-list').replaceChildren(...children.map((task) => taskRow(task)));
+  renderTaskList($('child-list'), children);
 }
 
 function toggleCategoryInput(selectId, fieldId, inputId) {
@@ -424,16 +478,30 @@ function categoryChoice(value, inputId) {
 
 function syncAssigneeFilter() {
   const select = $('filter-assignee');
+  select.querySelector('option[value="me"]').textContent = memberName(ui.session.userId, true);
   const partner = select.querySelector('option[value="partner"]');
+  partner.textContent = ui.session.partnerId ? memberName(ui.session.partnerId) : 'Партнёр';
   partner.hidden = !ui.session.partnerId;
   partner.disabled = !ui.session.partnerId;
   if (!ui.session.partnerId && select.value === 'partner') select.value = 'all';
+  if (!$('quick-add').hidden) assigneeOptions($('new-assignee'), $('new-assignee').value);
 }
 
 function assigneeOptions(select, assigneeId) {
-  select.replaceChildren(new Option('Без назначения', ''), new Option('Мне', ui.session.userId));
-  if (ui.session.partnerId) select.add(new Option('Партнёру', ui.session.partnerId));
+  select.replaceChildren(new Option('Без исполнителя', ''),
+    ...ui.session.members.map(({ id }) => new Option(memberName(id, true), id)));
   select.value = assigneeId ?? '';
+}
+
+function toggleQuickAdd(open) {
+  $('quick-add').hidden = !open;
+  $('quick-add-toggle').setAttribute('aria-expanded', String(open));
+  if (!open) return;
+  const assignee = $('filter-assignee').value;
+  const assigneeId = assignee === 'partner' ? ui.session.partnerId
+    : assignee === 'me' || ui.view === 'day' && assignee === 'all' ? ui.session.userId : null;
+  assigneeOptions($('new-assignee'), assigneeId);
+  $('new-title').focus();
 }
 
 function toggleSchedule(prefix) {
@@ -470,6 +538,7 @@ function prepareChildForm(task) {
     ...ui.catalog.categories.map((category) => new Option(categoryOption(category), category.id)),
     new Option('Новая категория…', 'new'));
   $('child-title').value = '';
+  $('child-description').value = '';
   setSchedule('child', null);
   assigneeOptions($('child-assignee'), null);
   $('child-category-new').value = '';
@@ -489,6 +558,7 @@ async function openTask(id) {
   $('task-details').textContent = task.parentTitle ? `Подзадача к «${task.parentTitle}»` : '';
   showTaskStatus(task);
   $('edit-title').value = task.title;
+  $('edit-description').value = task.description;
   setSchedule('edit', task.period);
   assigneeOptions($('edit-assignee'), task.assigneeId);
   $('edit-importance').value = task.importance;
@@ -515,6 +585,7 @@ async function updateTask() {
   const patch = {
     version: task.version,
     title: $('edit-title').value,
+    description: $('edit-description').value,
     importance: $('edit-importance').value,
     period: scheduleValue('edit'),
     assigneeId: Number($('edit-assignee').value) || null,
@@ -682,32 +753,56 @@ function bindUi() {
   for (const tab of document.querySelectorAll('[data-view]')) {
     tab.addEventListener('click', () => run(() => changeView(tab.dataset.view), tab));
   }
-  for (const id of ['period-mode', 'scope-day', 'scope-month', 'scope-year', 'filter-category', 'filter-assignee', 'filter-importance', 'filter-status']) {
-    $(id).addEventListener('change', () => {
-      if (ui.view !== 'statistics') {
-        ui.filterStatus[ui.view] = $('filter-status').value;
-        ui.filterAssignee[ui.view] = $('filter-assignee').value;
-      }
-      run(loadList);
-    });
+  const saveFilters = () => {
+    if (ui.view !== 'statistics') {
+      ui.filters[ui.view] = Object.fromEntries(filterKeys.map((key) => [key, $(`filter-${key}`).value]));
+    }
+  };
+  for (const key of filterKeys.filter((key) => key !== 'query')) {
+    $(`filter-${key}`).addEventListener('change', () => { saveFilters(); run(loadList); });
   }
+  for (const id of ['period-mode', 'scope-month', 'scope-year']) $(id).addEventListener('change', () => run(loadList));
+  const dayInput = $('scope-day');
+  const chooseDay = () => {
+    if (!dayInput.validity.valid) return;
+    const date = dayInput.value && dayInput.value !== ui.today ? dayInput.value : null;
+    if (date === ui.selectedDay) return;
+    ui.selectedDay = date;
+    run(loadList);
+  };
+  dayInput.addEventListener('input', chooseDay);
+  dayInput.addEventListener('change', () => {
+    if (!dayInput.value) dayInput.value = ui.today;
+    chooseDay();
+  });
   let searchTimer;
   $('filter-query').addEventListener('input', () => {
+    saveFilters();
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => run(loadList), 160);
   });
+  $('filters-toggle').addEventListener('click', () => {
+    const open = $('task-filters').hidden;
+    $('task-filters').hidden = !open;
+    $('filters-toggle').setAttribute('aria-expanded', String(open));
+  });
+  $('quick-add-toggle').addEventListener('click', () => toggleQuickAdd($('quick-add').hidden));
   $('quick-add').addEventListener('submit', (event) => {
     event.preventDefault();
     run(async () => {
       const input = $('new-title');
       const scope = selectedScope();
       const period = scope === 'all' || scope === 'none' ? null : scope;
-      const assignee = $('filter-assignee').value;
-      const assigneeId = assignee === 'partner' ? ui.session.partnerId
-        : assignee === 'me' || ui.view === 'day' && assignee === 'all' ? ui.session.userId : null;
+      const description = $('new-description');
+      const assigneeId = Number($('new-assignee').value) || null;
       const importance = ui.view === 'major' ? 'global' : 'low';
-      const { task } = await api('tasks', { title: input.value, period, assigneeId, importance }, 'POST');
+      const { task } = await api('tasks', { title: input.value, description: description.value, period, assigneeId, importance }, 'POST');
       input.value = '';
+      description.value = '';
+      if (!$('quick-add').hidden) {
+        toggleQuickAdd(false);
+        $('quick-add-toggle').focus();
+      }
       const visible = ui.panel === 'list' && ui.view !== 'statistics' ? await loadList() : null;
       const location = period ? `Задача добавлена. Срок — ${periodLabel(period)}.` : 'Задача добавлена.';
       notify(visible && !visible.some(({ id }) => id === task.id)
@@ -756,7 +851,7 @@ function bindUi() {
       const request = ui.cardRequest;
       const category = $('child-category').value;
       const body = {
-        title: $('child-title').value, parentId, period: scheduleValue('child'),
+        title: $('child-title').value, description: $('child-description').value, parentId, period: scheduleValue('child'),
         assigneeId: Number($('child-assignee').value) || null,
       };
       if (category !== 'inherit') body.categoryChoice = categoryChoice(category, 'child-category-new');

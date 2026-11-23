@@ -200,9 +200,10 @@ export class Bot {
 
     for (const [id, review] of this.reviews) if (review.expires <= Date.now()) this.reviews.delete(id);
     const ctx = {
-      callback, message, user: user.id, private: message.chat.type === 'private',
+      callback, message, user: user.id, firstName: user.first_name, private: message.chat.type === 'private',
       space: this.store.spaceFor(user.id), updateId: update.update_id,
     };
+    if (ctx.space) this.store.rememberMemberName(ctx.user, ctx.firstName);
     if (callback) {
       let notice;
       try {
@@ -311,7 +312,9 @@ export class Bot {
     if (!Object.hasOwn(commands, name)) return;
     const { message, user } = ctx;
     if (name === 'start' && ctx.private) {
+      const existing = ctx.space;
       ctx.space = this.applyAction(ctx, () => this.store.joinOrCreate(user, args === 'app' ? '' : args));
+      if (!existing) this.store.rememberMemberName(user, ctx.firstName);
       if (ctx.space.pendingJoin) {
         const { token, taskCount } = ctx.space.pendingJoin;
         const lines = [
