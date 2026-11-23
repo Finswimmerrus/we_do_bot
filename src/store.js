@@ -188,6 +188,14 @@ export class Store {
       CREATE INDEX IF NOT EXISTS tasks_by_period ON tasks(space_id, period, status);
       CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks(space_id, parent_id);
       CREATE INDEX IF NOT EXISTS tasks_by_assignee ON tasks(assignee_id, period, status);
+      CREATE TABLE IF NOT EXISTS task_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+        sender_id INTEGER NOT NULL REFERENCES members(user_id),
+        recipient_id INTEGER NOT NULL REFERENCES members(user_id),
+        due_at INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
     `);
   }
 
@@ -539,7 +547,37 @@ export class Store {
       INSERT INTO tasks (space_id, title, description, parent_id, period, category, assignee_id, importance, created_by, created_at, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(space, title, description, parentId, period, category, assigneeId, importance, user, new Date().toISOString(), source);
-    return Number(lastInsertRowid);
+    const id = Number(lastInsertRowid);
+    this.#queueTaskNotification(space, id, user, assigneeId);
+    return id;
+  }
+
+  #queueTaskNotification(space, taskId, sender, assignee) {
+    if (sender === null || assignee === sender) return;
+    const recipient = assignee ?? this.db.prepare('SELECT user_id AS id FROM members WHERE space_id = ? AND user_id <> ?')
+      .get(space, sender)?.id;
+    if (recipient === undefined) return;
+    this.db.prepare('INSERT INTO task_notifications (task_id, sender_id, recipient_id) VALUES (?, ?, ?)')
+      .run(taskId, sender, recipient);
+  }
+
+  pendingTaskNotification(now = Date.now()) {
+    return this.db.prepare(`
+      SELECT n.id, n.recipient_id AS recipient, n.attempts, sender.display_name AS sender,
+        t.id AS taskId, t.title, t.period, t.assignee_id AS assigneeId
+      FROM task_notifications AS n JOIN tasks AS t ON t.id = n.task_id
+      JOIN members AS sender ON sender.user_id = n.sender_id AND sender.space_id = t.space_id
+      JOIN members AS recipient ON recipient.user_id = n.recipient_id AND recipient.space_id = t.space_id
+      WHERE n.due_at <= ? ORDER BY n.id LIMIT 1
+    `).get(now);
+  }
+
+  removeTaskNotification(id) {
+    this.db.prepare('DELETE FROM task_notifications WHERE id = ?').run(id);
+  }
+
+  retryTaskNotification(id, dueAt) {
+    this.db.prepare('UPDATE task_notifications SET due_at = ?, attempts = attempts + 1 WHERE id = ?').run(dueAt, id);
   }
 
   createTask(space, user, input, source = null) {
@@ -607,9 +645,10 @@ export class Store {
     });
   }
 
-  updateTask(space, id, patch) {
+  updateTask(space, id, patch, editor = null) {
     return this.transaction(() => {
       const task = this.task(space, id);
+      const previousAssignee = task.assigneeId;
       if (task.version !== patch.version) {
         throw new InputError('Задача уже изменилась. Откройте её заново.', 409);
       }
@@ -660,6 +699,9 @@ export class Store {
           completed_at = ?, version = version + 1 WHERE space_id = ? AND id = ?
       `).run(task.title, task.description, task.status, task.period, task.category, task.importance, JSON.stringify(task.tags),
         task.parentId, task.assigneeId, task.completedAt, space, id);
+      const assigneeChanged = task.assigneeId !== previousAssignee;
+      if (assigneeChanged || task.status !== 'active') this.db.prepare('DELETE FROM task_notifications WHERE task_id = ?').run(id);
+      if (assigneeChanged && task.status === 'active') this.#queueTaskNotification(space, id, editor, task.assigneeId);
       return this.task(space, id);
     });
   }

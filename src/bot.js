@@ -284,6 +284,39 @@ export class Bot {
     }
   }
 
+  async processTaskNotifications(signal) {
+    while (!signal.aborted) {
+      const notification = this.store.pendingTaskNotification();
+      if (notification) await this.sendTaskNotification(notification, signal);
+      else await setTimeout(400, undefined, { signal }).catch((error) => {
+        if (error.name !== 'AbortError') throw error;
+      });
+    }
+  }
+
+  async sendTaskNotification(notification, signal) {
+    const { id, recipient, taskId, sender, title, period, assigneeId, attempts } = notification;
+    const lines = [assigneeId === null ? 'Задача для двоих' : 'Вам назначили задачу', title];
+    if (period) lines.push(`Срок — ${labelPeriod(period)}`);
+    if (sender) lines.push(`Отправитель — ${sender}`);
+    try {
+      await this.api.call('sendMessage', {
+        chat_id: recipient, text: lines.join('\n'),
+        link_preview_options: { is_disabled: true },
+        reply_markup: markup([[button('Открыть задачу', `t2:all:all:0:${taskId}`)]]),
+      }, AbortSignal.any([signal, AbortSignal.timeout(10_000)]));
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error.retryable || error.code === 429 || error.code >= 500) {
+        const seconds = Math.max(error.retryAfter ?? 0, Math.min(5 * 2 ** attempts, 300));
+        this.store.retryTaskNotification(id, Date.now() + seconds * 1000);
+        return;
+      }
+      if (error.code !== 400 && error.code !== 403) throw error;
+    }
+    this.store.removeTaskNotification(id);
+  }
+
   async processVoice(job, signal) {
     let titles = [];
     let reply;
@@ -502,7 +535,7 @@ export class Bot {
     const lines = [task.title, labelPeriod(task.period), `${importanceSymbols[task.importance]} ${importanceLevels[task.importance]}`];
     if (task.status === 'obsolete') lines.push('Отменена');
     if (task.parentTitle) lines.push(`Подзадача к «${task.parentTitle}»`);
-    if (ctx.private && task.assigneeId) lines.push(task.assigneeId === ctx.user ? 'Назначена вам' : 'Назначена партнёру');
+    if (ctx.private) lines.push(task.assigneeId === null ? 'Для двоих' : task.assigneeId === ctx.user ? 'Назначена вам' : 'Назначена партнёру');
     if (children.total) {
       if (children.done + children.active) {
         lines.push(`Подзадачи: ${children.done} из ${children.done + children.active} выполнено · ${children.active} активно`);

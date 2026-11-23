@@ -571,3 +571,63 @@ test('сроки и крупные задачи разделены, работа
   assert.equal(linked.groupLinked, true);
   assert.equal(linked.groupSetupUrl, null);
 });
+
+test('назначение задачи и режим для двоих уведомляют партнёра в личном чате', async (t) => {
+  const { store, receive, last } = setup(t);
+  await receive(11, '/start');
+  await receive(22, '/start ' + store.spaceFor(11).invite);
+
+  const server = webServer({ store, token, username: 'test_bot', timeZone: 'Europe/Moscow' });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const save = async (user, path, method, body) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/tasks${path}`, {
+      method, headers: { 'x-telegram-init-data': signed(user), 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(response.status, method === 'POST' ? 201 : 200);
+    return (await response.json()).task;
+  };
+  const add = (user, body) => save(user, '', 'POST', body);
+  const change = (user, task, body) => save(user, `/${task.id}`, 'PATCH', { version: task.version, ...body });
+
+  const mine = await add(11, { title: 'Моя задача', assigneeId: 11 });
+  assert.equal(store.pendingTaskNotification(), undefined);
+  const partner = await add(11, { title: 'Позвонить', period: '2026-11-23', assigneeId: 22 });
+  await change(11, partner, { title: 'Позвонить вечером', assigneeId: 22 });
+  const shared = await add(22, { title: 'Собрать вещи', assigneeId: null });
+  const withdrawn = await add(11, { title: 'Переназначена себе', assigneeId: 22 });
+  await change(11, withdrawn, { assigneeId: 11 });
+  await change(11, mine, { assigneeId: 22 });
+
+  const first = store.pendingTaskNotification();
+  const controller = new AbortController();
+  const limitedBot = new Bot({ store, api: {
+    async call() { throw Object.assign(new Error('rate limited'), { code: 429, retryAfter: 20 }); },
+  } });
+  await limitedBot.sendTaskNotification(first, controller.signal);
+  assert.equal(store.pendingTaskNotification().taskId, shared.id);
+  const retry = store.pendingTaskNotification(Date.now() + 21_000);
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.attempts, 1);
+  store.retryTaskNotification(first.id, 0);
+
+  const sent = [];
+  const worker = new Bot({ store, api: {
+    async call(method, data) {
+      assert.equal(method, 'sendMessage');
+      sent.push(data);
+      if (sent.length === 3) controller.abort();
+    },
+  } });
+  await worker.processTaskNotifications(AbortSignal.any([controller.signal, AbortSignal.timeout(2000)]));
+  assert.deepEqual(sent.map(({ chat_id }) => chat_id), [22, 11, 22]);
+  assert.match(sent[0].text, /Вам назначили задачу\nПозвонить вечером\nСрок — 23 ноября 2026/);
+  assert.match(sent[0].text, /Имя 11/);
+  assert.match(sent[1].text, /Задача для двоих\nСобрать вещи/);
+  assert.equal(sent[2].reply_markup.inline_keyboard[0][0].callback_data, `t2:all:all:0:${mine.id}`);
+  assert.equal(store.pendingTaskNotification(), undefined);
+  await receive(22, '/task Купить хлеб');
+  assert.match(last('sendMessage').text, /Добавлено/);
+  assert.equal(store.pendingTaskNotification().recipient, 11);
+});

@@ -171,7 +171,7 @@ export function webServer({ store, token, username, timeZone, dailyReviewHour = 
           });
         }
         if (request.method === 'PATCH') {
-          return sendJson(response, 200, { task: store.updateTask(space.id, id, await bodyOf(request)) });
+          return sendJson(response, 200, { task: store.updateTask(space.id, id, await bodyOf(request), user) });
         }
         if (request.method === 'DELETE') {
           const { version } = await bodyOf(request);

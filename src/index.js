@@ -34,24 +34,24 @@ async function main() {
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
-  let voices;
+  let workers = [];
   try {
     server.listen(port, host);
     await once(server, 'listening');
     await registerCommands(api);
     console.log(`@${username} запущен. Mini App слушает http://${host}:${port}`);
     const bot = new Bot({ api, store, username, appUrl, timeZone, transcribe });
-    voices = bot.processVoices(controller.signal).catch((error) => {
+    workers = [bot.processVoices(controller.signal), bot.processTaskNotifications(controller.signal)].map((worker) => worker.catch((error) => {
       controller.abort();
       return error;
-    });
+    }));
     await poll(api, bot, controller.signal);
   } finally {
     controller.abort();
-    const voiceError = await voices;
+    const workerError = (await Promise.all(workers)).find(Boolean);
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     store.close();
-    if (voiceError) throw voiceError;
+    if (workerError) throw workerError;
   }
 }
 

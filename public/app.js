@@ -263,7 +263,7 @@ function showYear(monthStats) {
 }
 
 function memberName(id, distinguishSelf = false) {
-  if (id === null) return 'Без исполнителя';
+  if (id === null) return 'Для двоих';
   const name = ui.session.members.find((member) => member.id === id)?.name;
   const mine = id === ui.session.userId;
   if (!name) return mine ? 'Вы' : 'Партнёр';
@@ -594,7 +594,7 @@ function syncAssigneeFilter() {
 }
 
 function assigneeOptions(select, assigneeId) {
-  select.replaceChildren(new Option('Без исполнителя', ''),
+  select.replaceChildren(new Option('Для двоих', ''),
     ...ui.session.members.map(({ id }) => new Option(memberName(id, true), id)));
   select.value = assigneeId ?? '';
 }
