@@ -4,11 +4,18 @@ const $ = (id) => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
 const ui = {
   view: 'day', panel: 'list', listRequest: 0, cardRequest: 0,
-  filters: {}, selectedDay: null,
+  filters: {}, taskPeriod: null, statsPeriod: null, calendarPage: null,
   task: null, review: null, session: null,
   catalog: { categories: [] }, labelToDelete: null, today: null, dayFinished: false,
 };
-const viewTitles = { day: 'День', month: 'Месяц', year: 'Год', unscheduled: 'Без срока', major: 'Крупные', statistics: 'Статистика' };
+const viewTitles = { unscheduled: 'Без срока', major: 'Крупные', statistics: 'Статистика' };
+const periods = {
+  day: { length: 10, previous: 'Предыдущий день', next: 'Следующий день', current: 'Сегодня' },
+  month: { length: 7, previous: 'Предыдущий месяц', next: 'Следующий месяц', current: 'Текущий месяц' },
+  year: { length: 4, previous: 'Предыдущий год', next: 'Следующий год', current: 'Текущий год' },
+};
+const dayFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+const monthFormat = new Intl.DateTimeFormat('ru-RU', { month: 'long', timeZone: 'UTC' });
 const filterKeys = ['status', 'assignee', 'category', 'importance', 'query'];
 const importanceNames = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
 const statusActions = {
@@ -67,21 +74,129 @@ function show(panel) {
 function periodLabel(period) {
   if (!period) return 'Без срока';
   if (period.length === 4) return period;
-  if (period.length === 10) return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' })
-    .format(new Date(`${period}T00:00:00Z`));
-  const month = new Intl.DateTimeFormat('ru-RU', { month: 'long', timeZone: 'UTC' })
-    .format(new Date(`${period}-01T00:00:00Z`));
+  if (period.length === 10) return dayFormat.format(new Date(`${period}T00:00:00Z`));
+  const month = monthFormat.format(new Date(`${period}-01T00:00:00Z`));
   return `${month[0].toUpperCase()}${month.slice(1)} ${period.slice(0, 4)}`;
 }
 
 function selectedScope() {
   if (ui.view === 'unscheduled') return 'none';
   if (ui.view === 'major') return 'all';
-  if (ui.view === 'day') return ui.selectedDay ?? ui.today;
-  if (ui.view === 'year' || ui.view === 'statistics' && $('period-mode').value === 'year') {
-    return $('scope-year').validity.valid && $('scope-year').value || ui.session.currentPeriod.slice(0, 4);
+  if (ui.view === 'statistics') return ui.statsPeriod ?? currentScope('month');
+  return ui.taskPeriod ?? ui.today;
+}
+
+function periodMode(scope) {
+  return scope.length === 10 ? 'day' : scope.length === 7 ? 'month' : 'year';
+}
+
+function currentScope(mode) {
+  return ui.today.slice(0, periods[mode].length);
+}
+
+function shiftPeriod(scope, step) {
+  const [year, month = 1, day = 1] = scope.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (scope.length === 10) date.setUTCDate(day + step);
+  else if (scope.length === 7) date.setUTCMonth(month - 1 + step);
+  else date.setUTCFullYear(year + step);
+  return date.getUTCFullYear() >= 1000 && date.getUTCFullYear() <= 9999 ? date.toISOString().slice(0, scope.length) : null;
+}
+
+function applyPeriod(scope) {
+  if (!scope || scope === selectedScope()) return;
+  ui.cardRequest++;
+  if (ui.view === 'statistics') ui.statsPeriod = scope;
+  else {
+    ui.taskPeriod = scope === ui.today ? null : scope;
+    const mode = periodMode(scope);
+    if (ui.view !== mode) return changeView(mode);
   }
-  return /^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test($('scope-month').value) ? $('scope-month').value : ui.session.currentPeriod;
+  return loadList();
+}
+
+function renderPeriodSwitch(scope) {
+  const settings = periods[periodMode(scope)];
+  const day = scope.length === 10;
+  const label = periodLabel(scope) + (day && scope.slice(0, 4) !== ui.today.slice(0, 4) ? ` ${scope.slice(0, 4)}` : '');
+  const relative = scope === ui.today ? 'Сегодня' : scope === shiftPeriod(ui.today, 1) ? 'Завтра'
+    : scope === shiftPeriod(ui.today, 2) ? 'Послезавтра' : null;
+  $('period-caption').textContent = relative ?? label;
+  $('period-open').setAttribute('aria-label', `Выбрать период · ${relative ? `${relative}, ` : ''}${label}`);
+  for (const [id, step, hint] of [['period-prev', -1, settings.previous], ['period-next', 1, settings.next]]) {
+    const button = $(id);
+    button.disabled = !shiftPeriod(scope, step);
+    button.title = hint;
+    button.setAttribute('aria-label', hint);
+  }
+}
+
+function calendarPageFor(scope) {
+  if (scope.length === 10) return scope.slice(0, 7);
+  if (scope.length === 7) return scope.slice(0, 4);
+  return `${scope.slice(0, 3)}0`;
+}
+
+function chooseCalendarPeriod(scope) {
+  $('period-picker').close();
+  return applyPeriod(scope);
+}
+
+function renderCalendar() {
+  const selected = selectedScope();
+  const mode = periodMode(selected);
+  const page = ui.calendarPage;
+  const today = currentScope(mode);
+  const grid = $('calendar-grid');
+  const year = Number(page.slice(0, 4));
+  const step = mode === 'year' ? 10 : 1;
+  $('calendar-caption').textContent = mode === 'year' ? `${year}–${year + 9}` : periodLabel(page);
+  $('calendar-prev').disabled = !shiftPeriod(page, -step);
+  $('calendar-next').disabled = !shiftPeriod(page, step);
+  $('calendar-current').textContent = periods[mode].current;
+  for (const button of $('period-picker').querySelectorAll('[data-period-mode]')) {
+    button.hidden = ui.view === 'statistics' && button.dataset.periodMode === 'day';
+    button.setAttribute('aria-pressed', String(button.dataset.periodMode === mode));
+  }
+  const choices = [];
+  const addChoice = (scope, label, accessibleLabel) => {
+    const button = element('button', label, 'calendar-choice');
+    button.type = 'button';
+    button.dataset.scope = scope;
+    if (accessibleLabel) button.setAttribute('aria-label', accessibleLabel);
+    button.setAttribute('aria-pressed', String(scope === selected));
+    if (scope === today) button.setAttribute('aria-current', 'date');
+    choices.push(button);
+  };
+  if (mode === 'day') {
+    const month = Number(page.slice(5));
+    const first = new Date(Date.UTC(year, month - 1, 1));
+    const length = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    choices.push(...['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label) => element('span', label, 'calendar-weekday')));
+    for (let index = 0; index < (first.getUTCDay() + 6) % 7; index++) choices.push(element('span'));
+    for (let date = 1; date <= length; date++) {
+      const scope = `${page}-${String(date).padStart(2, '0')}`;
+      addChoice(scope, date, `${periodLabel(scope)} ${year}`);
+    }
+  } else if (mode === 'month') {
+    for (let month = 1; month <= 12; month++) {
+      const scope = `${page}-${String(month).padStart(2, '0')}`;
+      addChoice(scope, periodLabel(scope).split(' ')[0]);
+    }
+  } else {
+    for (let offset = 0; offset < 10; offset++) addChoice(String(year + offset), year + offset);
+  }
+  grid.dataset.mode = mode;
+  grid.replaceChildren(...choices);
+}
+
+function openPeriodPicker() {
+  const dialog = $('period-picker');
+  ui.calendarPage = calendarPageFor(selectedScope());
+  renderCalendar();
+  dialog.showModal();
+  $('period-open').setAttribute('aria-expanded', 'true');
+  dialog.querySelector('[data-period-mode][aria-pressed="true"]').focus();
 }
 
 function categoryOption({ name, icon }) {
@@ -142,11 +257,7 @@ function showYear(monthStats) {
     const button = element('button', periodLabel(period).split(' ')[0]);
     button.type = 'button';
     button.append(element('small', `${stats.done} ✓ · ${stats.active} ○ · ${stats.obsolete} –`));
-    button.addEventListener('click', () => run(() => {
-      $('scope-month').value = period;
-      $('period-mode').value = 'month';
-      return loadList();
-    }, button));
+    button.addEventListener('click', () => run(() => applyPeriod(period), button));
     return button;
   }));
 }
@@ -209,7 +320,7 @@ function taskRow(task, hidePeriod, expanded) {
   actions.append(edit);
   if (ui.view === 'day' && task.status === 'active' && task.period?.length === 10
       && (task.period < ui.today || task.period === ui.today && ui.dayFinished)) {
-    const target = task.period < ui.today ? ui.today : nextDay(ui.today);
+    const target = task.period < ui.today ? ui.today : shiftPeriod(ui.today, 1);
     if (target) {
       const move = element('button', '↪', 'icon-button');
       const label = task.period < ui.today ? 'Перенести на сегодня' : 'Перенести на завтра';
@@ -239,12 +350,6 @@ function taskHint(symbol, label) {
   hint.title = label;
   hint.setAttribute('aria-label', label);
   return hint;
-}
-
-function nextDay(day) {
-  const date = new Date(`${day}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + 1);
-  return date.getUTCFullYear() <= 9999 ? date.toISOString().slice(0, 10) : null;
 }
 
 function renderStatusActions(container, task, card = false) {
@@ -354,18 +459,18 @@ async function loadList() {
       categoryId: $('filter-category').value, assignee: $('filter-assignee').value,
       importance: view === 'major' ? '' : $('filter-importance').value, include: 'catalog',
     });
-  $('period-mode-label').hidden = !statistics;
-  $('scope-day-label').hidden = view !== 'day';
-  $('scope-month-label').hidden = view !== 'month' && !(statistics && scope.length === 7);
-  $('scope-year-label').hidden = view !== 'year' && !(statistics && scope.length === 4);
+  const dated = Object.hasOwn(periods, view);
+  $('list-heading').dataset.view = view;
+  $('period-switch').hidden = !dated && !statistics;
+  if (dated || statistics) renderPeriodSwitch(scope);
   $('filter-importance').closest('label').hidden = statistics || view === 'major';
   $('quick-add-toggle').hidden = statistics;
   $('filters-toggle').hidden = statistics;
   $('filters-toggle').dataset.filtered = !statistics && (params.get('status') !== 'all' || params.get('assignee') !== 'all'
     || ['query', 'categoryId', 'importance'].some((key) => params.get(key)));
   $('review-start').hidden = !statistics;
-  $('view-title').textContent = view === 'day' ? scope === ui.today ? 'Сегодня' : periodLabel(scope)
-    : view === 'month' || view === 'year' ? periodLabel(scope) : viewTitles[view];
+  $('view-title').hidden = dated;
+  $('view-title').textContent = viewTitles[view] ?? '';
   $('stats').hidden = !statistics;
   $('task-list').hidden = statistics;
   const listKey = `${view}/${scope}`;
@@ -395,9 +500,9 @@ async function loadList() {
     ui.session.partnerId = partnerId;
     ui.session.members = members;
     syncAssigneeFilter();
-    if (ui.selectedDay === null && today !== previousToday) {
-      $('scope-day').value = today;
-      if (view === 'day') return await loadList();
+    if (dated && today !== previousToday) {
+      if (ui.taskPeriod === null) return await loadList();
+      renderPeriodSwitch(scope);
     }
     fillCategoryFilter(catalog.categories);
     if ($('filter-category').value !== params.get('categoryId') || $('filter-assignee').value !== params.get('assignee')) {
@@ -419,6 +524,7 @@ async function loadList() {
 }
 
 function changeView(name) {
+  if (name === 'period') name = periodMode(ui.taskPeriod ?? ui.today);
   if (name !== ui.view || ui.panel !== 'list') {
     toggleQuickAdd(false);
     $('task-filters').hidden = true;
@@ -426,7 +532,8 @@ function changeView(name) {
   }
   ui.view = name;
   for (const tab of document.querySelectorAll('[data-view]')) {
-    tab.setAttribute('aria-current', tab.dataset.view === name ? 'page' : 'false');
+    const active = tab.dataset.view === (Object.hasOwn(periods, name) ? 'period' : name);
+    tab.setAttribute('aria-current', active ? 'page' : 'false');
   }
   if (name !== 'statistics') {
     const filters = ui.filters[name] ?? { status: ['unscheduled', 'major'].includes(name) ? 'active' : 'all', assignee: 'all' };
@@ -751,7 +858,10 @@ async function renderLabels() {
 
 function bindUi() {
   for (const tab of document.querySelectorAll('[data-view]')) {
-    tab.addEventListener('click', () => run(() => changeView(tab.dataset.view), tab));
+    tab.addEventListener('click', () => {
+      if (tab.dataset.view === 'period' && ui.panel === 'list' && Object.hasOwn(periods, ui.view)) openPeriodPicker();
+      else run(() => changeView(tab.dataset.view), tab);
+    });
   }
   const saveFilters = () => {
     if (ui.view !== 'statistics') {
@@ -761,20 +871,32 @@ function bindUi() {
   for (const key of filterKeys.filter((key) => key !== 'query')) {
     $(`filter-${key}`).addEventListener('change', () => { saveFilters(); run(loadList); });
   }
-  for (const id of ['period-mode', 'scope-month', 'scope-year']) $(id).addEventListener('change', () => run(loadList));
-  const dayInput = $('scope-day');
-  const chooseDay = () => {
-    if (!dayInput.validity.valid) return;
-    const date = dayInput.value && dayInput.value !== ui.today ? dayInput.value : null;
-    if (date === ui.selectedDay) return;
-    ui.selectedDay = date;
-    run(loadList);
-  };
-  dayInput.addEventListener('input', chooseDay);
-  dayInput.addEventListener('change', () => {
-    if (!dayInput.value) dayInput.value = ui.today;
-    chooseDay();
+  $('period-open').addEventListener('click', openPeriodPicker);
+  $('period-picker').addEventListener('close', () => $('period-open').setAttribute('aria-expanded', 'false'));
+  for (const [direction, step] of [['prev', -1], ['next', 1]]) {
+    $(`period-${direction}`).addEventListener('click', () => run(() => applyPeriod(shiftPeriod(selectedScope(), step))));
+    $(`calendar-${direction}`).addEventListener('click', () => {
+      const offset = periodMode(selectedScope()) === 'year' ? 10 : 1;
+      ui.calendarPage = shiftPeriod(ui.calendarPage, step * offset);
+      renderCalendar();
+    });
+  }
+  for (const button of $('period-picker').querySelectorAll('[data-period-mode]')) {
+    button.addEventListener('click', () => run(() => {
+      const mode = button.dataset.periodMode;
+      if (mode === periodMode(selectedScope())) return;
+      const scope = currentScope(mode);
+      ui.calendarPage = calendarPageFor(scope);
+      const loading = applyPeriod(scope);
+      renderCalendar();
+      return loading;
+    }));
+  }
+  $('calendar-grid').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-scope]');
+    if (button) run(() => chooseCalendarPeriod(button.dataset.scope));
   });
+  $('calendar-current').addEventListener('click', () => run(() => chooseCalendarPeriod(currentScope(periodMode(selectedScope())))));
   let searchTimer;
   $('filter-query').addEventListener('input', () => {
     saveFilters();
@@ -937,14 +1059,11 @@ async function init() {
   try {
     ui.session = await api('session');
     ui.today = ui.session.currentDay;
-    $('scope-day').value = ui.today;
-    $('scope-month').value = ui.session.currentPeriod;
-    $('scope-year').value = ui.session.currentPeriod.slice(0, 4);
     $('entry').hidden = true;
     $('settings').hidden = false;
     $('workspace').hidden = false;
     bindUi();
-    await changeView('day');
+    await changeView('period');
   } catch (error) {
     if ($('entry').hidden) notify(error.message, true);
     else $('entry').textContent = error.message;

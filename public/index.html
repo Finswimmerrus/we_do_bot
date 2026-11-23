@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Вместе — задачи пары</title>
-  <link rel="stylesheet" href="/style.css?v=6">
+  <link rel="stylesheet" href="/style.css?v=7">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-  <script src="/app.js?v=6" defer></script>
+  <script src="/app.js?v=7" defer></script>
 </head>
 <body>
   <main>
@@ -18,34 +18,28 @@
     <section id="entry" aria-live="polite"><p>Загружаем задачи…</p></section>
     <div id="workspace" hidden>
       <nav aria-label="Разделы" class="tabs">
-        <button type="button" data-view="day">День</button>
-        <button type="button" data-view="month">Месяц</button>
-        <button type="button" data-view="year">Год</button>
+        <button type="button" data-view="period">Период</button>
         <button type="button" data-view="unscheduled">Без срока</button>
         <button type="button" data-view="major">Крупные</button>
         <button type="button" data-view="statistics">Статистика</button>
       </nav>
       <section id="list-view">
-        <div class="heading">
-          <h1 id="view-title">День</h1>
-          <button id="quick-add-toggle" class="primary icon-button" type="button" title="Добавить задачу"
-            aria-label="Добавить задачу" aria-controls="quick-add" aria-expanded="false" hidden><span aria-hidden="true">+</span></button>
-          <button id="review-start" type="button" hidden>Разобрать</button>
-        </div>
-        <div class="list-toolbar">
-          <label id="period-mode-label" hidden>Период
-            <select id="period-mode"><option value="month">Месяц</option><option value="year">Год</option></select>
-          </label>
-          <label id="scope-day-label" hidden>
-            <input id="scope-day" type="date" aria-label="Дата списка" min="1000-01-01" max="9999-12-31">
-          </label>
-          <label id="scope-month-label" hidden>Месяц
-            <input id="scope-month" type="month" placeholder="ГГГГ-ММ" pattern="[1-9][0-9]{3}-(0[1-9]|1[0-2])">
-          </label>
-          <label id="scope-year-label" hidden>Год
-            <input id="scope-year" type="number" min="1000" max="9999">
-          </label>
-          <button id="filters-toggle" class="quiet" type="button" aria-controls="task-filters" aria-expanded="false" hidden>Фильтры</button>
+        <div class="heading" id="list-heading">
+          <h1 id="view-title" hidden></h1>
+          <div id="period-switch" class="period-switch" hidden>
+            <button id="period-prev" class="quiet arrow-button" type="button" aria-label="Предыдущий период"><span aria-hidden="true"></span></button>
+            <button id="period-open" class="period-open" type="button" aria-haspopup="dialog" aria-controls="period-picker" aria-expanded="false">
+              <span class="calendar-icon" aria-hidden="true"></span><span id="period-caption" aria-live="polite"></span>
+            </button>
+            <button id="period-next" class="quiet arrow-button" type="button" aria-label="Следующий период"><span aria-hidden="true"></span></button>
+          </div>
+          <div class="list-controls">
+            <button id="filters-toggle" class="quiet icon-button" type="button" title="Фильтры"
+              aria-label="Фильтры" aria-controls="task-filters" aria-expanded="false" hidden><span class="filter-icon" aria-hidden="true"></span></button>
+            <button id="quick-add-toggle" class="primary icon-button" type="button" title="Добавить задачу"
+              aria-label="Добавить задачу" aria-controls="quick-add" aria-expanded="false" hidden><span aria-hidden="true">+</span></button>
+            <button id="review-start" type="button" hidden>Разобрать</button>
+          </div>
         </div>
         <form id="quick-add" class="editor card" hidden>
           <label class="wide">Название<input id="new-title" maxlength="200" required></label>
@@ -204,6 +198,24 @@
       </section>
     </div>
   </main>
+  <dialog id="period-picker" aria-labelledby="period-picker-title">
+    <div class="calendar-header">
+      <h2 id="period-picker-title">Выбор периода</h2>
+      <form method="dialog"><button class="quiet icon-button calendar-close" type="submit" aria-label="Закрыть календарь">×</button></form>
+    </div>
+    <div class="calendar-modes" role="group" aria-label="Тип периода">
+      <button type="button" data-period-mode="day" autofocus>День</button>
+      <button type="button" data-period-mode="month">Месяц</button>
+      <button type="button" data-period-mode="year">Год</button>
+    </div>
+    <div class="calendar-header">
+      <button id="calendar-prev" class="quiet arrow-button" type="button" aria-label="Предыдущая страница календаря"><span aria-hidden="true"></span></button>
+      <strong id="calendar-caption" aria-live="polite"></strong>
+      <button id="calendar-next" class="quiet arrow-button" type="button" aria-label="Следующая страница календаря"><span aria-hidden="true"></span></button>
+    </div>
+    <div id="calendar-grid" class="calendar-grid"></div>
+    <button id="calendar-current" class="quiet" type="button">Сегодня</button>
+  </dialog>
   <dialog id="delete-label-dialog" aria-labelledby="delete-label-title">
     <form method="dialog">
       <h2 id="delete-label-title">Удалить категорию?</h2>
