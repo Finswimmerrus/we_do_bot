@@ -17,11 +17,12 @@ const periods = {
 const dayFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' });
 const monthFormat = new Intl.DateTimeFormat('ru-RU', { month: 'long', timeZone: 'UTC' });
 const filterKeys = ['status', 'assignee', 'category', 'importance', 'query'];
+const defaultTaskStatus = (view) => Object.hasOwn(periods, view) ? 'current' : 'active';
 const importanceNames = { low: 'Низкая', medium: 'Средняя', high: 'Важная', global: 'Глобальная' };
 const statusActions = {
   active: { label: 'Вернуть в активные', notice: 'Задача снова активна.' },
   done: { label: 'Завершить', notice: 'Задача завершена.' },
-  obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Её можно найти в списке «Неактуальные».' },
+  obsolete: { label: 'Отменить задачу', notice: 'Задача отменена. Её можно вернуть через фильтр «Неактуальные».' },
 };
 
 function element(tag, text, className = '') {
@@ -299,7 +300,7 @@ function taskRow(task, listScope, expanded) {
   if (category) labels.append(categoryChip(category, true));
   labels.append(priorityBadge(task.importance, true));
   if (task.period && task.period !== listScope) labels.append(element('small', periodLabel(task.period), 'row-period'));
-  if (task.status === 'obsolete') labels.append(taskHint('–', 'Отменена'));
+  if (task.status === 'obsolete') labels.append(element('small', 'Отменена', 'task-hint'));
   summary.append(labels);
 
   const details = element('div', undefined, 'task-preview');
@@ -309,7 +310,6 @@ function taskRow(task, listScope, expanded) {
   metadata.append(element('span', memberName(task.assigneeId, true)), element('span', periodLabel(task.period)));
   if (category) metadata.append(categoryChip(category));
   metadata.append(priorityBadge(task.importance));
-  if (task.status === 'obsolete') metadata.append(element('span', 'Отменена'));
   details.append(metadata);
 
   const actions = element('div', undefined, 'task-status-actions');
@@ -430,7 +430,9 @@ async function changeStatus(current, status) {
     }
     throw error;
   }
-  if (cardIsOpen()) {
+  if (cardIsOpen() && status === 'obsolete') {
+    await changeView(ui.view);
+  } else if (cardIsOpen()) {
     ui.task = updated;
     showTaskStatus(updated);
   } else {
@@ -466,7 +468,7 @@ async function loadList() {
   $('filter-importance').closest('label').hidden = statistics || view === 'major';
   $('quick-add-toggle').hidden = statistics;
   $('filters-toggle').hidden = statistics;
-  $('filters-toggle').dataset.filtered = !statistics && (params.get('status') !== 'all' || params.get('assignee') !== 'all'
+  $('filters-toggle').dataset.filtered = !statistics && (params.get('status') !== defaultTaskStatus(view) || params.get('assignee') !== 'all'
     || ['query', 'categoryId', 'importance'].some((key) => params.get(key)));
   $('review-start').hidden = !statistics;
   $('view-title').hidden = dated;
@@ -535,7 +537,7 @@ function changeView(name) {
     tab.setAttribute('aria-current', active ? 'page' : 'false');
   }
   if (name !== 'statistics') {
-    const filters = ui.filters[name] ?? { status: ['unscheduled', 'major'].includes(name) ? 'active' : 'all', assignee: 'all' };
+    const filters = ui.filters[name] ?? { status: defaultTaskStatus(name), assignee: 'all' };
     for (const key of filterKeys) $(`filter-${key}`).value = filters[key] ?? '';
     syncAssigneeFilter();
   }

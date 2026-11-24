@@ -519,7 +519,10 @@ test('сроки и крупные задачи разделены, работа
   const untimed = store.createTask(space, 11, { title: 'Починить полку' });
   store.createTask(space, 11, { title: 'День из октября', period: '2026-10-31' });
   const lastDay = store.createTask(space, 11, { title: 'Последний день ноября', period: '2026-11-30' });
+  store.updateTask(space, lastDay.id, { version: lastDay.version, status: 'done' });
   store.createTask(space, 11, { title: 'День из декабря', period: '2026-12-01' });
+  const canceled = store.createTask(space, 11, { title: 'Отменённая встреча', period: '2026-11-22' });
+  store.updateTask(space, canceled.id, { version: canceled.version, status: 'obsolete' });
   assert.throws(() => store.createTask(space, 11, { title: 'Чужой', assigneeId: 33 }));
   assert.throws(() => store.createTask(space, 11, { title: 'Подзадача', parentId: big.id, importance: 'global' }));
 
@@ -549,15 +552,19 @@ test('сроки и крупные задачи разделены, работа
   assert.deepEqual(filteredDay.members, session.members);
   assert.deepEqual(ids((await get('tasks?scope=2026-11-21&view=day')).tasks), [late.id]);
   const november = await get('tasks?scope=2026-11&view=month&include=catalog');
-  assert.deepEqual(ids(november.tasks), [lastDay.id, month.id, late.id, partner.id, today.id]);
+  assert.deepEqual(ids(november.tasks), [canceled.id, lastDay.id, month.id, late.id, partner.id, today.id]);
+  const currentMonth = await get('tasks?scope=2026-11&view=month&status=current');
+  assert.deepEqual(ids(currentMonth.tasks), [lastDay.id, month.id, late.id, partner.id, today.id]);
+  const obsoleteDay = await get('tasks?scope=2026-11-22&view=day&status=obsolete');
+  assert.deepEqual(ids(obsoleteDay.tasks), [canceled.id]);
   const filteredMonth = await get('tasks?scope=2026-11&view=month&assignee=partner&categoryId=' + bills.id);
   assert.deepEqual(ids(filteredMonth.tasks), [late.id, partner.id]);
   assert.deepEqual(ids((await get('tasks?scope=2026&view=year')).tasks), [year.id]);
   assert.deepEqual(ids((await get('tasks?scope=none&view=unscheduled')).tasks), [untimed.id]);
   assert.deepEqual(ids((await get('tasks?view=major')).tasks), [big.id]);
   const stats = await get('tasks?scope=2026&view=statistics&include=summary');
-  assert.equal(stats.stats.total, 8);
-  assert.equal(stats.monthStats['2026-11'].total, 5);
+  assert.equal(stats.stats.total, 9);
+  assert.equal(stats.monthStats['2026-11'].total, 6);
   await receive(11, '/day');
   assert.match(last('sendMessage').text, /Купить билеты/);
   await receive(11, '/month ноябрь');

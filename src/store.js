@@ -710,7 +710,7 @@ export class Store {
     scope = 'all', status = 'all', query = '', category = '', categoryId, tag = '', importance = '', view = '', assigneeId,
   } = {}) {
     parseScope(scope);
-    if (status !== 'all' && !Object.hasOwn(statuses, status)) throw new InputError('Выберите статус задачи.');
+    if (status !== 'all' && status !== 'current' && !Object.hasOwn(statuses, status)) throw new InputError('Выберите статус задачи.');
     const filters = ['t.space_id = ?'];
     const args = [space];
     if (view === 'major') filters.push("t.importance = 'global'");
@@ -725,7 +725,8 @@ export class Store {
       filters.push(range ? `substr(t.period, 1, ${scope.length}) = ?` : 't.period = ?');
       args.push(scope);
     }
-    if (status !== 'all') {
+    if (status === 'current') filters.push("t.status <> 'obsolete'");
+    else if (status !== 'all') {
       filters.push('t.status = ?');
       args.push(status);
     }
