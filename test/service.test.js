@@ -622,9 +622,8 @@ test('назначение задачи и режим для двоих увед
   } });
   await worker.processTaskNotifications(AbortSignal.any([controller.signal, AbortSignal.timeout(2000)]));
   assert.deepEqual(sent.map(({ chat_id }) => chat_id), [22, 11, 22]);
-  assert.match(sent[0].text, /Вам назначили задачу\nПозвонить вечером\nСрок — 23 ноября 2026/);
-  assert.match(sent[0].text, /Имя 11/);
-  assert.match(sent[1].text, /Задача для двоих\nСобрать вещи/);
+  assert.equal(sent[0].text, 'Вам назначили задачу\nПозвонить вечером\nСрок — 23 ноября 2026 г.');
+  assert.equal(sent[1].text, 'Задача для двоих\nСобрать вещи');
   assert.equal(sent[2].reply_markup.inline_keyboard[0][0].callback_data, `t2:all:all:0:${mine.id}`);
   assert.equal(store.pendingTaskNotification(), undefined);
   await receive(22, '/task Купить хлеб');

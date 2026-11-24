@@ -295,10 +295,9 @@ export class Bot {
   }
 
   async sendTaskNotification(notification, signal) {
-    const { id, recipient, taskId, sender, title, period, assigneeId, attempts } = notification;
+    const { id, recipient, taskId, title, period, assigneeId, attempts } = notification;
     const lines = [assigneeId === null ? 'Задача для двоих' : 'Вам назначили задачу', title];
     if (period) lines.push(`Срок — ${labelPeriod(period)}`);
-    if (sender) lines.push(`Отправитель — ${sender}`);
     try {
       await this.api.call('sendMessage', {
         chat_id: recipient, text: lines.join('\n'),

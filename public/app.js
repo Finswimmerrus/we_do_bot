@@ -704,7 +704,8 @@ async function updateTask() {
     if ((error.status === 409 || error.status === 404) && request === ui.cardRequest) await openTask(task.id);
     throw error;
   }
-  if (request === ui.cardRequest) await openTask(task.id);
+  if (request !== ui.cardRequest) return;
+  await changeView(ui.view);
   notify('Изменения сохранены.');
 }
 

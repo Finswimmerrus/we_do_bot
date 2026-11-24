@@ -563,7 +563,7 @@ export class Store {
 
   pendingTaskNotification(now = Date.now()) {
     return this.db.prepare(`
-      SELECT n.id, n.recipient_id AS recipient, n.attempts, sender.display_name AS sender,
+      SELECT n.id, n.recipient_id AS recipient, n.attempts,
         t.id AS taskId, t.title, t.period, t.assignee_id AS assigneeId
       FROM task_notifications AS n JOIN tasks AS t ON t.id = n.task_id
       JOIN members AS sender ON sender.user_id = n.sender_id AND sender.space_id = t.space_id
